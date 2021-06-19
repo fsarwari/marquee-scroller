@@ -36,6 +36,10 @@ class TimeDB
     String getMonthName();
     String getAmPm();
     String zeroPad(int number);
+    double getLon();
+    double getLat();
+    double getTimezone();
+
 
   private:
     const char* servername = "api.timezonedb.com";  // remote server we will connect to
@@ -43,4 +47,5 @@ class TimeDB
     String myApiKey;
     String myLat;
     String myLon;
+    long myGmtOffset;
 };

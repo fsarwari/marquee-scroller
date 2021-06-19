@@ -27,6 +27,10 @@
 
 #include "Settings.h"
 
+#include "prayertimes.hpp"
+#include <ctime>
+String prayer_string;
+
 #define VERSION "2.16"
 
 #define HOSTNAME "CLOCK-"
@@ -345,10 +349,51 @@ void setup() {
 // Main Looop
 //************************************************************
 void loop() {
-  //Get some Weather Data to serve
+
   if ((getMinutesFromLastRefresh() >= minutesBetweenDataRefresh) || lastEpoch == 0) {
+    //Get some Weather Data to serve
     getWeatherData();
+
+    // Get prayer times after getWeatherData() because it sets the time.
+    time_t date = now();
+    PrayerTimes prayer_times;
+    double latitude = TimeDB.getLat();    // 42.987;
+    double longitude =  TimeDB.getLon(); // -78.987;
+
+    double timezone = TimeDB.getTimezone();
+    prayer_times.set_calc_method(PrayerTimes::ISNA);
+    prayer_times.set_asr_method(PrayerTimes::Shafii);
+    prayer_times.set_fajr_angle(15);
+    prayer_times.set_isha_angle(14);
+    prayer_times.set_maghrib_minutes(2);
+
+    double times[PrayerTimes::TimesCount];
+    static const char* TimeName[] =
+    {
+      "Fajr",
+      "Sunrise",
+      "Dhuhr",
+      "Asr",
+      "Sunset",
+      "Maghrib",
+      "Isha",
+    };
+
+    Serial.println("Date: " + (String) ctime(&date));
+    Serial.println("Timezone: " + (String) timezone);
+    Serial.println("latitude: " + (String) latitude);
+    Serial.println("longitude: " + (String) longitude);
+
+    prayer_times.get_prayer_times(date, latitude, longitude, timezone, times);
+    for (int i = 0; i < PrayerTimes::TimesCount; ++i) {
+      if ( strncmp((char *) TimeName[i], "Sunset", strlen("Sunset")) != 0 ) {
+        prayer_string += (String) TimeName[i] + " " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str() + "    ";
+        Serial.println( (String) TimeName[i] + ": " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str());
+      }
+    }
   }
+
+
   checkDisplay(); // this will see if we need to turn it on or off for night mode.
 
   if (lastMinute != TimeDB.zeroPad(minute())) {
@@ -383,6 +428,8 @@ void loop() {
       description.toUpperCase();
       String msg;
       msg += " ";
+      msg += prayer_string;
+
 
       if (SHOW_DATE) {
         msg += TimeDB.getDayName() + ", ";

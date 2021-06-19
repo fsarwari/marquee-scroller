@@ -82,11 +82,21 @@ time_t TimeDB::getTime()
   JsonObject& root = json_buf.parseObject(jsonArray);
   localMillisAtUpdate = millis();
   Serial.println();
+
+  if (root["gmtOffset"] == 0) {
+    Serial.println("Could not get timezone/gmtOffset");
+    return 20;
+  } else {
+    myGmtOffset = (long) root["gmtOffset"];
+    Serial.println("Set gmtOffset to: " + (String) myGmtOffset );
+  }
+
   if (root["timestamp"] == 0) {
     return 20;
   } else {
     return (unsigned long) root["timestamp"];
   }
+
 }
 
 String TimeDB::getDayName() {
@@ -179,3 +189,15 @@ String TimeDB::zeroPad(int number) {
   }
 }
 
+double TimeDB::getLon() {
+  return atof(myLon.c_str());
+}
+
+double TimeDB::getLat() {
+  return atof(myLat.c_str());
+
+}
+
+double TimeDB::getTimezone() {
+  return (double) myGmtOffset / 60 / 60;
+}
