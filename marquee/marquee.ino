@@ -385,6 +385,7 @@ void loop() {
     Serial.println("longitude: " + (String) longitude);
 
     prayer_times.get_prayer_times(date, latitude, longitude, timezone, times);
+    prayer_string = "";
     for (int i = 0; i < PrayerTimes::TimesCount; ++i) {
       if ( strncmp((char *) TimeName[i], "Sunset", strlen("Sunset")) != 0 ) {
         prayer_string += (String) TimeName[i] + " " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str() + "    ";
