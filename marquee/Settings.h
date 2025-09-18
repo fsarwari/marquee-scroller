@@ -1,122 +1,159 @@
-/** The MIT License (MIT)
-
-Copyright (c) 2018 David Payne
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+/**
+* Parts Copyright (c) 2018 David Payne
+* Parts Copyright (c) 2025 rob040@users.github.com
+* This code is licensed under MIT license (see LICENSE.txt for details)
 */
 
 /******************************************************************************
- * This is designed for the Wemos D1 ESP8266
- * Wemos D1 Mini:  https://amzn.to/2qLyKJd
- * MAX7219 Dot Matrix Module 4-in-1 Display For Arduino
- * Matrix Display:  https://amzn.to/2HtnQlD
+ * This is designed for the Wemos D1 ESP8266, but other ESP8266 boards work as well.
+ * Wemos D1 Mini:   https://www.wemos.cc/en/latest/d1/d1_mini.html
+ * MAX7219 LED Dot Matrix Module 4-in-1 Display (FC16) For Arduino
+ * Matrix Display:  https://www.electroduino.com/max7219-4-in-1-led-dot-matrix-display-module-functions/
  ******************************************************************************/
 /******************************************************************************
- * NOTE: The settings here are the default settings for the first loading.  
- * After loading you will manage changes to the settings via the Web Interface.  
- * If you want to change settings again in the settings.h, you will need to 
- * erase the file system on the Wemos or use the “Reset Settings” option in 
+ * NOTE: The settings here are the default settings for the first loading.
+ * After loading you will manage changes to the settings via the Web Interface.
+ * If you want to change settings again in the settings.h, you will need to
+ * erase the file system on the Wemos or use the “Reset Settings” option in
  * the Web Interface.
  ******************************************************************************/
- 
+
+//Compilation options (can also be set as compiler commandline define)
+#ifndef COMPILE_MQTT
+#define COMPILE_MQTT 1  // tried and tested
+#endif
+
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <ESP8266HTTPUpdateServer.h>
-#include <WiFiManager.h> // --> https://github.com/tzapu/WiFiManager
+
 #include <ESP8266mDNS.h>
 #include <ArduinoOTA.h>
-#include "FS.h"
+#include "LittleFS.h"
+#define FS LittleFS
 #include <SPI.h>
 #include <Adafruit_GFX.h> // --> https://github.com/adafruit/Adafruit-GFX-Library
-#include <Max72xxPanel.h> // --> https://github.com/markruys/arduino-Max72xxPanel
+#include <Max72xxPanel.h> // --> https://github.com/markruys/arduino-Max72xxPanel, fixed locally lib/arduino-Max72xxPanel
 #include <pgmspace.h>
 #include "OpenWeatherMapClient.h"
-#include "TimeDB.h"
-#include "NewsApiClient.h" 
-#include "OctoPrintClient.h"
-#include "BitcoinApiClient.h"
-#include "PiHoleClient.h"
+#include "TimeNTP.h"
+#include "TimeStr.h"
+#if COMPILE_MQTT
+#include "MqttClient.h"
+#endif
+
+// For ESP_WiFiManager_Lite, the include sequence does matter!
+//#include <WiFiManager.h> // --> https://github.com/tzapu/WiFiManager
+//#include <ESP_WiFiManager_Lite.h> // --> https://github.com/khoih-prog/ESP_WiFiManager_Lite, now updated local version
+#include "WmlSettings.h"
+#include "ESP_WiFiManager_Lite.h"
+#include "dynamicParams.h"
 
 //******************************
-// Start Settings
+// Hard(-ware related) settings
 //******************************
-
-String TIMEDBKEY = ""; // Your API Key from https://timezonedb.com/register
-String APIKEY = ""; // Your API Key from http://openweathermap.org/
-// Default City Location (use http://openweathermap.org/find to find city ID)
-int CityIDs[] = { 5304391 }; //Only USE ONE for weather marquee
-String marqueeMessage = "";
-boolean IS_METRIC = false; // false = Imperial and true = Metric
-boolean IS_24HOUR = false; // 23:00 millitary 24 hour clock
-boolean IS_PM = true; // Show PM indicator on Clock when in AM/PM mode
-const int WEBSERVER_PORT = 80; // The port you can access this device on over HTTP
-const boolean WEBSERVER_ENABLED = true;  // Device will provide a web interface via http://[ip]:[port]/
-boolean IS_BASIC_AUTH = false;  // Use Basic Authorization for Configuration security on Web Interface
-char* www_username = "admin";  // User account for the Web Interface
-char* www_password = "password";  // Password for the Web Interface
-int minutesBetweenDataRefresh = 15;  // Time in minutes between data refresh (default 15 minutes)
-int minutesBetweenScrolling = 1; // Time in minutes between scrolling data (default 1 minutes and max is 10)
-int displayScrollSpeed = 25; // In milliseconds -- Configurable by the web UI (slow = 35, normal = 25, fast = 15, very fast = 5)
-boolean flashOnSeconds = true; // when true the : character in the time will flash on and off as a seconds indicator
-
-boolean NEWS_ENABLED = true;
-String NEWS_API_KEY = ""; // Get your News API Key from https://newsapi.org
-String NEWS_SOURCE = "reuters";  // https://newsapi.org/sources to get full list of news sources available
-
 // Display Settings
-// CLK -> D5 (SCK)  
-// CS  -> D6 
-// DIN -> D7 (MOSI)
+// CLK -> D5 (SCK)  GPIO14 on ESP8266
+// CS  -> D6        GPIO12 on ESP8266
+// DIN -> D7 (MOSI) GPIO13 on ESP8266
 const int pinCS = D6; // Attach CS to this pin, DIN to MOSI and CLK to SCK (cf http://arduino.cc/en/Reference/SPI )
 int displayIntensity = 1;  //(This can be set from 0 - 15)
-const int numberOfHorizontalDisplays = 4; // default 4 for standard 4 x 1 display Max size of 16
-const int numberOfVerticalDisplays = 1; // default 1 for a single row height
-/* set ledRotation for LED Display panels (3 is default)
-0: no rotation
-1: 90 degrees clockwise
-2: 180 degrees
-3: 90 degrees counter clockwise (default)
-*/
-int ledRotation = 3;
+int displayWidth = 8; // default 4 for standard 4 x 1 display Max size of 16
+const int displayHeight = 1; // default 1 for a single row height (do not change, this SW does not support multiple lines, nor double hight chars)
+// set ledRotation for LED Display panels, 0: no rotation, 1: 90 degrees clockwise, 2: 180 degrees, 3: 90 degrees counter clockwise (default)
+const int ledRotation = 3;
 
-String timeDisplayTurnsOn = "06:30";  // 24 Hour Format HH:MM -- Leave blank for always on. (ie 05:30)
-String timeDisplayTurnsOff = "23:00"; // 24 Hour Format HH:MM -- Leave blank for always on. Both must be set to work.
+// Change the LED_ONBOARD to the pin you wish to use if other than the Built-in LED
+#define LED_ONBOARD  LED_BUILTIN // LED_BUILTIN is the on-board LED on the ESP12E module on the Wemos
+#define LED_ON  LOW   // define polarity of LED_ONBOARD
+#define LED_OFF HIGH  // define polarity of LED_ONBOARD
 
-// OctoPrint Monitoring -- Monitor your 3D printer OctoPrint Server
-boolean OCTOPRINT_ENABLED = false;
-boolean OCTOPRINT_PROGRESS = true;
-String OctoPrintApiKey = "";  // ApiKey from your User Account on OctoPrint
-String OctoPrintServer = "";  // IP or Address of your OctoPrint Server (DO NOT include http://)
-int OctoPrintPort = 80;       // the port you are running your OctoPrint server on (usually 80);
-String OctoAuthUser = "";     // only used if you have haproxy or basic athentintication turned on (not default)
-String OctoAuthPass = "";     // only used with haproxy or basic auth (only needed if you must authenticate)
+// uncomment define BUZZER pin when BUZZER is installed
+// #define BUZZER_PIN  D2
 
-// Bitcoin Client - NONE or empty is off
-String BitcoinCurrencyCode = "NONE";  // Change to USD, GBD, EUR, or NONE -- this can be managed in the Web Interface
 
-// Pi-hole Client -- monitor basic stats from your Pi-hole server (see http://pi-hole.net)
-boolean USE_PIHOLE = false;   // Set true to display your Pi-hole details
-String PiHoleServer = "";     // IP or Address only (DO NOT include http://)
-int PiHolePort = 80;          // Port of your Pi-hole address (default 80)
+// Configuration.ini file is stored in local filesystem
+#define CONFIG "/conf.txt"
 
-boolean ENABLE_OTA = true;    // this will allow you to load firmware to the device over WiFi (see OTA for ESP8266)
+
+
+//******************************
+// Configuration default Settings
+// (no need to change; these can be set on configuration page)
+//******************************
+
+String owmApiKey = ""; // Your free API Key from http://openweathermap.org/ (registration required; use Free Access for everyone )
+// Default GEO Location (use http://openweathermap.org/find to find location name being "cityname,countrycode" or "city ID" or GPS "latitude,longitude")
+String geoLocation = "Toronto,CA";
+String marqueeMessage = "";
+
+// Default Weather Settings
+bool showTemperature = true;
+bool showDate = false;
+bool showCity = true;
+bool showCondition = true;
+bool showHumidity = true;
+bool showWind = true;
+bool showWindDir = true;
+bool showPressure = false;
+bool showHighLow = true;
+
+const int staticDisplayTime = 5000;  // static display time per item, in ms
+bool isStaticDisplay = false; // static display above SHOW_* items
+bool isMetric = true; // false = Imperial and true = Metric
+bool is24hour = false; // 24 hour clock is displayed, false = 12 hour clock (for configuration, 24h time is always used)
+bool isPmIndicator = true; // Show PM indicator on Clock when in AM/PM mode
+bool isSysLed = true; // flash onboard LED on system actions
+const int WEBSERVER_PORT = 8080; // The port you can access this device on over HTTP
+const bool isWebserverEnabled = true;  // Device will provide a web interface via http://[ip]:[port]/
+bool isBasicAuth = false;  // Use Basic Authorization for Configuration security on Web Interface
+char www_username[32] = {"admin"};  // User account for the Web Interface
+char www_password[32] = {"password"};  // Password for the Web Interface
+int refreshDataInterval = 15;  // Time in minutes between data refresh (default 15 minutes)
+int displayScrollingInterval = 1; // Time in minutes between scrolling data (default 1 minutes and max is 10)
+int displayScrollSpeed = 25; // In milliseconds -- Configurable by the web UI (slow = 35, normal = 25, fast = 15, very fast = 5)
+bool flashOnSeconds = true; // when true the ':' character in the time will blink as a seconds indicator
+
+// New wide clock style config, different screen formats for 8+ tiles:
+int wideClockStyle = 6; // 1=HH:MM, 2=HH:MM:SS, 3=HH:MM *CF, 4=HH:MM %RH, 5=mm dd HH:MM, 6=HH:MM mmdd, 7=HH:MM ddmm, 8=HH:MM WwwDD (or HH:MM Www DD on >= 10 tile display)
+
+#define  WIDE_CLOCK_STYLE_HHMM      1
+#define  WIDE_CLOCK_STYLE_HHMMSS    2
+#define  WIDE_CLOCK_STYLE_HHMM_CF   3
+#define  WIDE_CLOCK_STYLE_HHMM_RH   4
+#define  WIDE_CLOCK_STYLE_MMDD_HHMM 5
+#define  WIDE_CLOCK_STYLE_HHMM_MMDD 6
+#define  WIDE_CLOCK_STYLE_HHMM_DDMM 7
+#define  WIDE_CLOCK_STYLE_HHMM_WWWDD 8
+#define  WIDE_CLOCK_STYLE_LAST      WIDE_CLOCK_STYLE_HHMM_WWWDD
+#define  WIDE_CLOCK_STYLE_FIRST     WIDE_CLOCK_STYLE_HHMM
+
+/* Quiet period setting*/
+#define TIME_HHMM(hh,mm) ((hh)*3600+(mm)*60)
+#define QTM_DISABLED        0
+#define QTM_DISPLAYOFF      1
+#define QTM_DIMMED          2
+#define QTM_DIMMED_NOSCROLL 3
+
+int quietTimeStart = TIME_HHMM(23,00); // 24 Hour Format HH:MM -- make negative for always on. Both must be set to work.
+int quietTimeEnd = TIME_HHMM(06,30);   // 24 Hour Format HH:MM -- make negative for always on.
+int quietTimeMode = QTM_DIMMED_NOSCROLL;
+int quietTimeDimlevel = 0;
+
+#if COMPILE_MQTT
+// Mqtt add scrolling messages with Mqtt
+bool isMqttEnabled = false;             // Set true to display mqtt messages
+String MqttServer = "";               // IP or Address only (DO NOT include http://)
+int MqttPort = 1883;                  // Port of your mqtt server (default 1883)
+String MqttTopic = "display/message"; // Topic on which to listen
+String  MqttAuthUser, MqttAuthPass;   // mqtt server authentication
+#endif
+
+const bool isOTAenabled = true;    // this will allow you to load firmware to the device over WiFi (see OTA for ESP8266)
 String OTA_Password = "";     // Set an OTA password here -- leave blank if you don't want to be prompted for password
+
+//blue-grey
+String themeColor = "blue-grey"; // this can be changed later in the web interface.
 
 //******************************
 // End Settings

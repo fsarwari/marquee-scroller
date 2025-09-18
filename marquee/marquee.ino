@@ -1,244 +1,441 @@
-/** The MIT License (MIT)
-
-  Copyright (c) 2018 David Payne
-
-  Permission is hereby granted, free of charge, to any person obtaining a copy
-  of this software and associated documentation files (the "Software"), to deal
-  in the Software without restriction, including without limitation the rights
-  to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-  copies of the Software, and to permit persons to whom the Software is
-  furnished to do so, subject to the following conditions:
-
-  The above copyright notice and this permission notice shall be included in all
-  copies or substantial portions of the Software.
-
-  THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-  OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-  SOFTWARE.
-*/
-
-/**********************************************
-  Edit Settings.h for personalization
-***********************************************/
+/**
+ * Copyright (c) 2018 David Payne
+ * Copyright (c) 2025 rob040@users.github.com
+ * This code is licensed under MIT license (see LICENSE.txt for details)
+ */
 
 #include "Settings.h"
-
 #include "prayertimes.hpp"
 #include <ctime>
 String prayer_string;
 
-#define VERSION "2.16"
+#define VERSION "3.2.1"
 
-#define HOSTNAME "CLOCK-"
-#define CONFIG "/conf.txt"
-#define BUZZER_PIN  D2
+// Refresh main web page every x seconds. The mainpage has button to activate its auto-refresh
+#define WEBPAGE_AUTOREFRESH   30
 
-/* Useful Constants */
-#define SECS_PER_MIN  (60UL)
-#define SECS_PER_HOUR (3600UL)
-#define SECS_PER_DAY  (SECS_PER_HOUR * 24L)
+// DARK mode: Add button to main page to toggle webpage dark mode
+#define WEBPAGE_DARKMODE
 
-/* Useful Macros for getting elapsed time */
-#define numberOfSeconds(_time_) (_time_ % SECS_PER_MIN)
-#define numberOfMinutes(_time_) ((_time_ / SECS_PER_MIN) % SECS_PER_MIN)
-#define numberOfHours(_time_) (( _time_% SECS_PER_DAY) / SECS_PER_HOUR)
-#define elapsedDays(_time_) ( _time_ / SECS_PER_DAY)
+// matrix fillscreen clear color is 0
+#define CLEARSCREEN  0
 
-//declairing prototypes
-void configModeCallback (WiFiManager *myWiFiManager);
+
+// declaring local prototypes
+
+void setup();
+void loop();
+void displayScrollMessage(const String &msg);
+void displayScrollErrorMessage(const String &msg, bool showOnce);
+void processEveryMinute();
+void processEverySecond();
+String hourMinutes(bool isRefresh);
+char secondsIndicator(bool isRefresh);
+bool authentication();
+void handlePull();
+void handleSaveMqtt();
+void handleSaveConfig();
+void handleSystemReset();
+void restartEsp();
+void handleForgetWifi();
+void handleMqttConfigure();
+void handleConfigure();
+void handleDisplay();
+void getWeatherData();
+void webDisplayMessage(const String &message);
+void redirectHome();
+void sendHeader(bool isMainPage = false);
+void sendFooter();
+void webDisplayWeatherData();
+void onBoardLed(bool on);
+void flashLED(int number, int delayTime);
+String getTempSymbol(bool forWeb = false);
+String getSpeedSymbol();
+String getPressureSymbol();
+String getTimeTillUpdate();
 int8_t getWifiQuality();
+int getMinutesFromLastRefresh();
+int getMinutesFromLastDisplay();
+void enableDisplay(bool enable);
+void checkDisplay();
+void writeConfiguration();
+void readConfiguration();
+void scrollMessageSetup(const String &msg);
+bool scrollMessageNext();
+void scrollMessageWait(const String &msg);
+bool staticDisplaySetupSingle(char * message);
+void staticDisplaySetup(void);
+void staticDisplayNext(void);
+void centerPrint(const String &msg, bool extraStuff = false);
+String EncodeHtmlSpecialChars(const char *msg);
+String EncodeUrlSpecialChars(const char *msg);
 
-// LED Settings
-const int offset = 1;
-int refresh = 0;
-String message = "hello";
-int spacer = 1;  // dots between letters
-int width = 5 + spacer; // The font width is 5 pixels + spacer
-Max72xxPanel matrix = Max72xxPanel(pinCS, numberOfHorizontalDisplays, numberOfVerticalDisplays);
-String Wide_Clock_Style = "1";  //1="hh:mm Temp", 2="hh:mm:ss", 3="hh:mm"
-float UtcOffset;  //time zone offsets that correspond with the CityID above (offset from GMT)
+// LED font constants; the font is a 5x7 pixels in a 6x8 space
+const int font_space = 1;  // dots between letters
+const int font_width = 5 + font_space; // The font width is 5 pixels + font_space
+
+Max72xxPanel matrix = Max72xxPanel(pinCS, 0, 0); // will be re-instantiated later in setup()
 
 // Time
-TimeDB TimeDB("");
-String lastMinute = "xx";
+int lastMinute;
+int lastSecond;
 int displayRefreshCount = 1;
-long lastEpoch = 0;
-long firstEpoch = 0;
-long displayOffEpoch = 0;
-boolean displayOn = true;
+uint32_t lastRefreshDataTimestamp;
+uint32_t firstTimeSync;
+uint32_t displayOffTimestamp;
+bool displayOn = true;
+bool isDisplayTimeNew;
+bool isDisplayMessageNew;
+bool isDisplayScrollErrorMsgNew;
+bool isDisplayScrollErrorMsgOnce;
+bool isQuietPeriod;
+bool isQuietPeriodNoBlinkNoscroll;
+String displayTime;
+char * newMqttMessage;
+String displayScrollMessageStr;
+String displayScrollErrorMsgStr;
 
-// News Client
-NewsApiClient newsClient(NEWS_API_KEY, NEWS_SOURCE);
-int newsIndex = 0;
+
+// Scroll message variables
+bool scrlBusy;
+int scrlPixTotal;
+int scrlPixIdx;
+int scrlPixY;
+int scrlMsgLen;
+unsigned long scrlPixelLastTime;
+String scrlMsg; // copy of scrolling message
+
+//Static data display
+String staticDisplay[8];
+bool isStaticDisplayNew;
+bool isStaticDisplayBusy;
+int staticDisplayIdx;
+int staticDisplayIdxOut;
+unsigned long staticDisplayLastTime;
+
+
+// loop() FSM statemachine
+enum loopState_e {
+  lStateIdle,
+  lStateScrollMsgPix,
+  lStateScrollNewMqttMsgPix,
+  lStateScrollErrMsgPix,
+  lStateDispStaticMsg,
+};
+enum loopState_e loopState, lastState;
+
+// Scheduler macro
+// SCHEDULE_INTERVAL(unsigned long work_variable, int intervaltime_ms, function)
+//   will call the function at regular time intervals, when included in loop().
+#define SCHEDULE_INTERVAL(_var,_interval_ms,_func) { if((millis()-(_var))>(unsigned)(_interval_ms)){_var=millis();_func();}}
+#define SCHEDULE_INTERVAL_START(_var,_delay) {_var=millis()-(_delay);}
 
 // Weather Client
-OpenWeatherMapClient weatherClient(APIKEY, CityIDs, 1, IS_METRIC);
-// (some) Default Weather Settings
-boolean SHOW_DATE = false;
-boolean SHOW_CITY = true;
-boolean SHOW_CONDITION = true;
-boolean SHOW_HUMIDITY = true;
-boolean SHOW_WIND = true;
-boolean SHOW_WINDDIR = true;
-boolean SHOW_PRESSURE = false;
-boolean SHOW_HIGHLOW = true;
+OpenWeatherMapClient weatherClient(owmApiKey, isMetric);
 
-// OctoPrint Client
-OctoPrintClient printerClient(OctoPrintApiKey, OctoPrintServer, OctoPrintPort, OctoAuthUser, OctoAuthPass);
-int printerCount = 0;
-
-// Pi-hole Client
-PiHoleClient piholeClient;
-
-// Bitcoin Client
-BitcoinApiClient bitcoinClient;
+#if COMPILE_MQTT
+// Mqtt Client
+MqttClient mqttClient(MqttServer, MqttPort, MqttTopic, MqttAuthUser, MqttAuthPass);
+#endif
 
 ESP8266WebServer server(WEBSERVER_PORT);
 ESP8266HTTPUpdateServer serverUpdater;
 
-static const char WEB_ACTIONS1[] PROGMEM = "<a class='w3-bar-item w3-button' href='/'><i class='fas fa-home'></i> Home</a>"
-                        "<a class='w3-bar-item w3-button' href='/configure'><i class='fas fa-cog'></i> Configure</a>"
-                        "<a class='w3-bar-item w3-button' href='/configurenews'><i class='far fa-newspaper'></i> News</a>"
-                        "<a class='w3-bar-item w3-button' href='/configureoctoprint'><i class='fas fa-cube'></i> OctoPrint</a>";
+ESP_WiFiManager_Lite* ESP_WiFiManager;
 
-static const char WEB_ACTIONS2[] PROGMEM = "<a class='w3-bar-item w3-button' href='/configurebitcoin'><i class='fab fa-bitcoin'></i> Bitcoin</a>"
-                        "<a class='w3-bar-item w3-button' href='/configurepihole'><i class='fas fa-network-wired'></i> Pi-hole</a>"
-                        "<a class='w3-bar-item w3-button' href='/pull'><i class='fas fa-cloud-download-alt'></i> Refresh Data</a>"
-                        "<a class='w3-bar-item w3-button' href='/display'>";
-
-static const char WEB_ACTION3[] PROGMEM = "</a><a class='w3-bar-item w3-button' href='/systemreset' onclick='return confirm(\"Do you want to reset to default weather settings?\")'><i class='fas fa-undo'></i> Reset Settings</a>"
-                       "<a class='w3-bar-item w3-button' href='/forgetwifi' onclick='return confirm(\"Do you want to forget to WiFi connection?\")'><i class='fas fa-wifi'></i> Forget WiFi</a>"
-                       "<a class='w3-bar-item w3-button' href='/restart'><i class='fas fa-sync'></i> Restart</a>"
-                       "<a class='w3-bar-item w3-button' href='/update'><i class='fas fa-wrench'></i> Firmware Update</a>"
-                       "<a class='w3-bar-item w3-button' href='https://github.com/Qrome/marquee-scroller' target='_blank'><i class='fas fa-question-circle'></i> About</a>";
-
-static const char CHANGE_FORM1[] PROGMEM = "<form class='w3-container' action='/locations' method='get'><h2>Configure:</h2>"
-                      "<label>TimeZone DB API Key (get from <a href='https://timezonedb.com/register' target='_BLANK'>here</a>)</label>"
-                      "<input class='w3-input w3-border w3-margin-bottom' type='text' name='TimeZoneDB' value='%TIMEDBKEY%' maxlength='60'>"
-                      "<label>OpenWeatherMap API Key (get from <a href='https://openweathermap.org/' target='_BLANK'>here</a>)</label>"
-                      "<input class='w3-input w3-border w3-margin-bottom' type='text' name='openWeatherMapApiKey' value='%WEATHERKEY%' maxlength='70'>"
-                      "<p><label>%CITYNAME1% (<a href='http://openweathermap.org/find' target='_BLANK'><i class='fas fa-search'></i> Search for City ID</a>)</label>"
-                      "<input class='w3-input w3-border w3-margin-bottom' type='text' name='city1' value='%CITY1%' onkeypress='return isNumberKey(event)'></p>"
-                      "<p><input name='metric' class='w3-check w3-margin-top' type='checkbox' %CHECKED%> Use Metric (Celsius)</p>"
-                      "<p><input name='showdate' class='w3-check w3-margin-top' type='checkbox' %DATE_CHECKED%> Display Date</p>"
-                      "<p><input name='showcity' class='w3-check w3-margin-top' type='checkbox' %CITY_CHECKED%> Display City Name</p>"
-                      "<p><input name='showhighlow' class='w3-check w3-margin-top' type='checkbox' %HIGHLOW_CHECKED%> Display Daily High/Low Temperatures</p>"
-                      "<p><input name='showcondition' class='w3-check w3-margin-top' type='checkbox' %CONDITION_CHECKED%> Display Weather Condition</p>"
-                      "<p><input name='showhumidity' class='w3-check w3-margin-top' type='checkbox' %HUMIDITY_CHECKED%> Display Humidity</p>"
-                      "<p><input name='showwind' class='w3-check w3-margin-top' type='checkbox' %WIND_CHECKED%> Display Wind</p>"
-                      "<p><input name='showpressure' class='w3-check w3-margin-top' type='checkbox' %PRESSURE_CHECKED%> Display Barometric Pressure</p>"
-                      "<p><input name='is24hour' class='w3-check w3-margin-top' type='checkbox' %IS_24HOUR_CHECKED%> Use 24 Hour Clock (military time)</p>";
-
-static const char CHANGE_FORM2[] PROGMEM = "<p><input name='isPM' class='w3-check w3-margin-top' type='checkbox' %IS_PM_CHECKED%> Show PM indicator (only 12h format)</p>"
-                      "<p><input name='flashseconds' class='w3-check w3-margin-top' type='checkbox' %FLASHSECONDS%> Flash : in the time</p>"
-                      "<p><label>Marquee Message (up to 60 chars)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='marqueeMsg' value='%MSG%' maxlength='60'></p>"
-                      "<p><label>Start Time </label><input name='startTime' type='time' value='%STARTTIME%'></p>"
-                      "<p><label>End Time </label><input name='endTime' type='time' value='%ENDTIME%'></p>"
-                      "<p>Display Brightness <input class='w3-border w3-margin-bottom' name='ledintensity' type='number' min='0' max='15' value='%INTENSITYOPTIONS%'></p>"
-                      "<p>Display Scroll Speed <select class='w3-option w3-padding' name='scrollspeed'>%SCROLLOPTIONS%</select></p>"
-                      "<p>Minutes Between Refresh Data <select class='w3-option w3-padding' name='refresh'>%OPTIONS%</select></p>"
-                      "<p>Minutes Between Scrolling Data <input class='w3-border w3-margin-bottom' name='refreshDisplay' type='number' min='1' max='10' value='%REFRESH_DISPLAY%'></p>";
-
-static const char CHANGE_FORM3[] PROGMEM = "<hr><p><input name='isBasicAuth' class='w3-check w3-margin-top' type='checkbox' %IS_BASICAUTH_CHECKED%> Use Security Credentials for Configuration Changes</p>"
-                      "<p><label>Marquee User ID (for this web interface)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='userid' value='%USERID%' maxlength='20'></p>"
-                      "<p><label>Marquee Password </label><input class='w3-input w3-border w3-margin-bottom' type='password' name='stationpassword' value='%STATIONPASSWORD%'></p>"
-                      "<p><button class='w3-button w3-block w3-green w3-section w3-padding' type='submit'>Save</button></p></form>"
-                      "<script>function isNumberKey(e){var h=e.which?e.which:event.keyCode;return!(h>31&&(h<48||h>57))}</script>";
-
-static const char BITCOIN_FORM[] PROGMEM = "<form class='w3-container' action='/savebitcoin' method='get'><h2>Bitcoin Configuration:</h2>"
-                        "<p>Select Bitcoin Currency <select class='w3-option w3-padding' name='bitcoincurrency'>%BITCOINOPTIONS%</select></p>"
-                        "<button class='w3-button w3-block w3-grey w3-section w3-padding' type='submit'>Save</button></form>";
-
-static const char CURRENCY_OPTIONS[] PROGMEM = "<option value='NONE'>NONE</option>"
-                          "<option value='USD'>United States Dollar</option>"
-                          "<option value='AUD'>Australian Dollar</option>"
-                          "<option value='BRL'>Brazilian Real</option>"
-                          "<option value='BTC'>Bitcoin</option>"
-                          "<option value='CAD'>Canadian Dollar</option>"
-                          "<option value='CNY'>Chinese Yuan</option>"
-                          "<option value='EUR'>Euro</option>"
-                          "<option value='GBP'>British Pound Sterling</option>"
-                          "<option value='XAU'>Gold (troy ounce)</option>";
-
-static const char WIDECLOCK_FORM[] PROGMEM = "<form class='w3-container' action='/savewideclock' method='get'><h2>Wide Clock Configuration:</h2>"
-                          "<p>Wide Clock Display Format <select class='w3-option w3-padding' name='wideclockformat'>%WIDECLOCKOPTIONS%</select></p>"
-                          "<button class='w3-button w3-block w3-grey w3-section w3-padding' type='submit'>Save</button></form>";
-
-static const char PIHOLE_FORM[] PROGMEM = "<form class='w3-container' action='/savepihole' method='get'><h2>Pi-hole Configuration:</h2>"
-                        "<p><input name='displaypihole' class='w3-check w3-margin-top' type='checkbox' %PIHOLECHECKED%> Show Pi-hole Statistics</p>"
-                        "<label>Pi-hole Address (do not include http://)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='piholeAddress' id='piholeAddress' value='%PIHOLEADDRESS%' maxlength='60'>"
-                        "<label>Pi-hole Port</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='piholePort' id= 'piholePort' value='%PIHOLEPORT%' maxlength='5'  onkeypress='return isNumberKey(event)'>"
-                        "<input type='button' value='Test Connection and JSON Response' onclick='testPiHole()'><p id='PiHoleTest'></p>"
-                        "<button class='w3-button w3-block w3-green w3-section w3-padding' type='submit'>Save</button></form>"
-                        "<script>function isNumberKey(e){var h=e.which?e.which:event.keyCode;return!(h>31&&(h<48||h>57))}</script>";
-
-static const char PIHOLE_TEST[] PROGMEM = "<script>function testPiHole(){var e=document.getElementById(\"PiHoleTest\"),t=document.getElementById(\"piholeAddress\").value,"
-                       "n=document.getElementById(\"piholePort\").value;"
-                       "if(e.innerHTML=\"\",\"\"==t||\"\"==n)return e.innerHTML=\"* Address and Port are required\","
-                       "void(e.style.background=\"\");var r=\"http://\"+t+\":\"+n;r+=\"/admin/api.php?summary\",window.open(r,\"_blank\").focus()}</script>";
-
-static const char NEWS_FORM1[] PROGMEM =   "<form class='w3-container' action='/savenews' method='get'><h2>News Configuration:</h2>"
-                        "<p><input name='displaynews' class='w3-check w3-margin-top' type='checkbox' %NEWSCHECKED%> Display News Headlines</p>"
-                        "<label>News API Key (get from <a href='https://newsapi.org/' target='_BLANK'>here</a>)</label>"
-                        "<input class='w3-input w3-border w3-margin-bottom' type='text' name='newsApiKey' value='%NEWSKEY%' maxlength='60'>"
-                        "<p>Select News Source <select class='w3-option w3-padding' name='newssource' id='newssource'></select></p>"
-                        "<script>var s='%NEWSSOURCE%';var tt;var xmlhttp=new XMLHttpRequest();xmlhttp.open('GET','https://raw.githubusercontent.com/Qrome/marquee-scroller/master/sources.json',!0);"
-                        "xmlhttp.onreadystatechange=function(){if(xmlhttp.readyState==4){if(xmlhttp.status==200){var obj=JSON.parse(xmlhttp.responseText);"
-                        "obj.sources.forEach(t)}}};xmlhttp.send();function t(it){if(it!=null){if(s==it.id){se=' selected'}else{se=''}tt+='<option'+se+'>'+it.id+'</option>';"
-                        "document.getElementById('newssource').innerHTML=tt}}</script>"
-                        "<button class='w3-button w3-block w3-grey w3-section w3-padding' type='submit'>Save</button></form>";
-
-static const char OCTO_FORM[] PROGMEM = "<form class='w3-container' action='/saveoctoprint' method='get'><h2>OctoPrint Configuration:</h2>"
-                        "<p><input name='displayoctoprint' class='w3-check w3-margin-top' type='checkbox' %OCTOCHECKED%> Show OctoPrint Status</p>"
-                        "<p><input name='octoprintprogress' class='w3-check w3-margin-top' type='checkbox' %OCTOPROGRESSCHECKED%> Show OctoPrint progress with clock</p>"
-                        "<label>OctoPrint API Key (get from your server)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='octoPrintApiKey' value='%OCTOKEY%' maxlength='60'>"
-                        "<label>OctoPrint Address (do not include http://)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='octoPrintAddress' value='%OCTOADDRESS%' maxlength='60'>"
-                        "<label>OctoPrint Port</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='octoPrintPort' value='%OCTOPORT%' maxlength='5'  onkeypress='return isNumberKey(event)'>"
-                        "<label>OctoPrint User (only needed if you have haproxy or basic auth turned on)</label><input class='w3-input w3-border w3-margin-bottom' type='text' name='octoUser' value='%OCTOUSER%' maxlength='30'>"
-                        "<label>OctoPrint Password </label><input class='w3-input w3-border w3-margin-bottom' type='password' name='octoPass' value='%OCTOPASS%'>"
-                        "<button class='w3-button w3-block w3-green w3-section w3-padding' type='submit'>Save</button></form>"
-                        "<script>function isNumberKey(e){var h=e.which?e.which:event.keyCode;return!(h>31&&(h<48||h>57))}</script>";
+ESP_WM_LITE_Configuration defaultConfig = WML_DEFAULT_CONFIG;//{0};
 
 
+static const char webHeaderHtml[] PROGMEM = "<!DOCTYPE HTML>"
+  "<html><head>"
+  "<title>Marquee LED matrix Clock</title>"
+  "<meta charset='UTF-8'>"
+  "<meta http-equiv='Content-Type' content='text/html; charset=UTF-8' />"
+  "<meta name='viewport' content='width=device-width, initial-scale=1'>"
+  "<meta name='description' content='Clock and Weather Marquee displaying time and current weather information on LED matrix display.'>"
+  "<meta name='keywords' content='clock, LED matrix display, weather, marquee, information'>"
+  "<link rel='stylesheet' href='https://www.w3schools.com/w3css/4/w3.css'>"
+  "<link rel='stylesheet' href='https://www.w3schools.com/lib/w3-theme-$COLOR$.css'>"
+  "<link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.8.1/css/all.min.css'>"
+  "<link rel='icon' href='data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAACJUlEQVQ4T2NkwAUcHFj0LKPegKQvHV8mwn"
+  "DgwB9sShlDQ0OZbyk5bf0iIKWEouA/A+N/RkYVBgZGIOPfHSD1H1me58Ozexfv7fNmdEgrFrmpE/z6uZIlin5GIA9FB5r1kvePM0hdXisKMUA3+PUXAWkG9m8fcHiIC"
+  "Sj+Dy73k0uAgefDUwZ1ZAO4Pr9meCVjwCD++CzOYAFJvJQ1ZhB9coHhO48og/oVJBew/frG8FjZhkHi4Rm8BryQN2GQvXuE4RcrF9SAYqAXFIJfww14RMAAOXQDoGHA"
+  "+/4xw2dBWQbuTy/gLngvqgpmC76+DRf7yifBAFYrIIvqhZeyRgwsv38iOf8/g8ydw2D+ExVbIAmKFwj4w8oODKtz0EBsAHpBGBiNiqjRCFLI//IuAwMwAj6KKiMZDIo"
+  "NJgZQNKLEwj9GFgbWHx8ZmP//Y/jKL8XwRkoHb7qAG2CbWrHkK5+4ENPfvwzfeEUYGP/9BaaHjww/eITwxgbHt/fA8Hr5jtE2rXLev38M8xkYOIEavuPVhC7JzMSYwG"
+  "iXXm7H8BfofiD4xclbddMg2Fn50qaTXF/fVcE0cAAZ77iF2u7q+ZmrX1i7l+375zawHPP/P/CgtU2v1Lqt43fhHws7s/qZFZaH53adQrbRNrnM7KZJxHGmvz//ql7eZ"
+  "HB4Zvs1kDzcAJu06kVPlawDhV5dX3G2rzgVm1+Mi3pnvxPTjJC+d3T9kVmtcSA1AN+w4BmrADV4AAAAAElFTkSuQmCC'>"
+  "<style>"
+    "body{"
+      "font-family:Arial, sans-serif;"
+      "font-size:16px;"
+    "}"
+    ".w3-button{"
+      "border:none;"
+      "border-radius:5px;"
+      "cursor:pointer;"
+    "}"
+    ".w3-button:hover{"
+      "background-color:#ccc;"
+    "}"
+    ".w3-small{margin:4px 0 4px;}"
+    ".dark-mode{"
+      "background-color:#333;"
+      "color:#fff;"
+    "}"
+    ".dark-mode *{"
+      "background-color:inherit;"
+      "color:inherit;"
+    "}"
+    ".dark-mode .w3-theme{"
+      "background-color:#444;"
+    "}"
+    ".dark-mode .w3-theme-d2{"
+      "background-color:#555;"
+    "}"
+    ".dark-mode i{"
+      "color:#fff;"
+    "}"
+  "</style>"
+  "</head>\n"
+"<body>\n"
+  "<header class='w3-top w3-bar w3-theme'>"
+  "<button class='w3-bar-item w3-button w3-xxxlarge w3-hover-theme' onclick='openSidebar()'>"
+  "<i class='fas fa-bars'></i>"
+  "</button>"
+  "<h3 class='w3-bar-item'>Weather Marquee</h3>"
+  ;
+static const char webHeaderMainPage[] PROGMEM =
+  "<div class='w3-right'>"
+    #if defined (WEBPAGE_AUTOREFRESH) && (WEBPAGE_AUTOREFRESH > 0)
+    "<button id='autorefresh-button' class='w3-button w3-small' onclick='toggleAutoRefresh()' title='toggle Auto Refresh Mode'>"
+       "<i id='autorefresh-icon' class='fas fa-sync'></i>"
+    "</button><br>"
+    #endif
+    #if defined (WEBPAGE_DARKMODE)
+    "<button id='darkmode-button' class='w3-button w3-small' onclick='toggleDarkMode()' title='toggle Dark Mode '>"
+       "<i id='darkmode-icon' class='fas fa-moon'></i>"
+    "</button>"
+    #endif
+  "</div>"
+;
 
-const int TIMEOUT = 500; // 500 = 1/2 second
-int timeoutCount = 0;
+static const char webBody1[] PROGMEM =
+  "</header>\n"
+  "<nav id='mySidebar' class='w3-sidebar w3-bar-block w3-card'>"
+  "<div class='w3-container w3-theme-d2'>"
+  "<span onclick='closeSidebar()' class='w3-button w3-display-topright w3-large'><i class='fas fa-times'></i></span>"
+  "<div class='w3-left'><img src='http://openweathermap.org/img/w/$ICO$.png' alt='$IDES$'></div>"
+  "<div class='w3-padding'>Menu</div></div>";
 
-// Change the externalLight to the pin you wish to use if other than the Built-in LED
-int externalLight = LED_BUILTIN; // LED_BUILTIN is is the built in LED on the Wemos
+static const char webBody2[] PROGMEM =
+  "</nav>\n"
+  "<script>"
+  "function openSidebar(){document.getElementById('mySidebar').style.display='block'}"
+  "function closeSidebar(){document.getElementById('mySidebar').style.display='none'}"
+  "closeSidebar();"
+  #if defined (WEBPAGE_DARKMODE)
+  "function restoreDarkMode(){const darkModeEnabled=localStorage.getItem('darkModeEnabled')==='true';"
+  "if(darkModeEnabled){document.body.classList.add('dark-mode');}}"
+  "restoreDarkMode();"
+  #endif
+  "</script>\n"
+  "<div class='w3-container w3-large' style='margin-top:88px'>\n";
+
+static const char webBody2MainPage[] PROGMEM =
+  "<script>"
+  #if defined (WEBPAGE_AUTOREFRESH) && (WEBPAGE_AUTOREFRESH > 0)
+  "var intervaltimer=0;"
+  "function refreshPage(){if(document.getElementById('mySidebar').style.display==='none')window.location.reload();}"
+  "function toggleAutoRefresh(){const autoRefreshEnabled=localStorage.getItem('autoRefreshEnabled')==='true';"
+  "const newState=!autoRefreshEnabled;localStorage.setItem('autoRefreshEnabled',newState);updateAutoRefreshButton(newState);"
+  "if(newState){startAutoRefresh();}else{stopAutoRefresh();}}"
+  "function updateAutoRefreshButton(enabled){const autoRefreshIcon=document.getElementById('autorefresh-icon');"
+  "if(enabled){autoRefreshIcon.classList.add('fa-spin');}else{autoRefreshIcon.classList.remove('fa-spin');}}"
+  "function stopAutoRefresh(){clearInterval(intervaltimer);}"
+  "function startAutoRefresh(){intervaltimer=setInterval(refreshPage," __STRINGIZE(WEBPAGE_AUTOREFRESH) "*1000);}"
+  "function initAutoRefresh(){const autoRefreshEnabled=localStorage.getItem('autoRefreshEnabled')==='true';"
+  "if(autoRefreshEnabled){startAutoRefresh();updateAutoRefreshButton(true);}"
+  "else{stopAutoRefresh();updateAutoRefreshButton(false);}}"
+  "initAutoRefresh();"
+  #endif
+  #if defined (WEBPAGE_DARKMODE)
+  "function toggleDarkMode(){const darkModeEnabled=localStorage.getItem('darkModeEnabled')==='true';"
+  "const newState=!darkModeEnabled;localStorage.setItem('darkModeEnabled',newState);updateDarkModeButton(newState);"
+  "document.body.classList.toggle('dark-mode',newState);}"
+  "function updateDarkModeButton(enabled){const darkModeIcon=document.getElementById('darkmode-icon');"
+  "if(enabled){darkModeIcon.classList.replace('fa-moon','fa-sun');}"
+  "else{darkModeIcon.classList.replace('fa-sun','fa-moon');}}"
+  "function initDarkMode(){const darkModeEnabled=localStorage.getItem('darkModeEnabled')==='true';"
+  "if(darkModeEnabled){document.body.classList.add('dark-mode');updateDarkModeButton(true);}"
+  "else{updateDarkModeButton(false);}}"
+  "initDarkMode();"
+  #endif
+  "</script>\n";
+
+static const char webFooterHtml[] PROGMEM = "<br><br><br>"
+  "</div>\n"
+  "<footer class='w3-container w3-bottom w3-theme'>"
+  "<i class='far fa-paper-plane'></i> Version: " VERSION " build " __DATE__ " " __TIME__ "<br>"
+  "<i class='far fa-clock'></i> Next Data Update: $UPD$ <br>"
+  "<i class='fas fa-rss'></i> Signal Strength: $RSSI$%"
+  "</footer>\n"
+  "</body></html>\n";
+
+static const char webActions1[] PROGMEM =
+  "<a class='w3-bar-item w3-button' href='/'><i class='fas fa-home'></i> Home</a>"
+  "<a class='w3-bar-item w3-button' href='/configure'><i class='fas fa-cog'></i> Configure</a>"
+  #if COMPILE_MQTT
+  "<a class='w3-bar-item w3-button' href='/configuremqtt'><i class='fas fa-network-wired'></i> MQTT</a>"
+  #endif
+  "<a class='w3-bar-item w3-button' href='/pull'><i class='fas fa-cloud-download-alt'></i> Refresh Data</a>"
+  "<a class='w3-bar-item w3-button' href='/display'>";
+
+static const char webActions2_ON[] PROGMEM =
+  "<i class='fas fa-eye-slash'></i> Turn Display OFF";
+static const char webActions2_OFF[] PROGMEM =
+  "<i class='fas fa-eye'></i> Turn Display ON";
+
+static const char webActions3[] PROGMEM =
+  "</a><a class='w3-bar-item w3-button' href='/systemreset' onclick='return confirm(\"Do you want to reset to default weather settings?\")'>"
+  "<i class='fas fa-undo'></i> Reset Settings</a>"
+  "<a class='w3-bar-item w3-button' href='/forgetwifi' onclick='return confirm(\"Do you want to forget to WiFi connection?\")'><i class='fas fa-wifi'></i> Forget WiFi</a>"
+  "<a class='w3-bar-item w3-button' href='/restart'><i class='fas fa-sync'></i> Restart</a>"
+  "<a class='w3-bar-item w3-button' href='/update'><i class='fas fa-wrench'></i> Firmware Update</a>"
+  "<a class='w3-bar-item w3-button' href='https://github.com/rob040/LEDmatrixClock' target='_blank'><i class='fas fa-question-circle'></i> About</a>";
+
+static const char webChangeForm1[] PROGMEM =
+  "<form class='w3-container' action='/saveconfig' method='get'><h2>Configure:</h2>"
+  "<fieldset><legend>OpenWeatherMap configuration</legend>"
+  "<label>OpenWeatherMap API Key (get free access from <a href='https://openweathermap.org/price#freeaccess' target='_BLANK'>openweathermap.org</a>)</label>"
+  "<input class='w3-input w3-border' type='text' name='openWeatherMapApiKey' value='%OWMKEY%' maxlength='70'>"
+  "<p><label>Geo Location "
+  "<small>Enter one of `City-name,2-letter-country-code` OR `City-ID` OR GPS `Latitude,Longitude`</small> "
+  "(<a href='http://openweathermap.org/find' target='_BLANK'><i class='fas fa-search'></i> Search for Geo Location</a>) </label>"
+  "<input class='w3-input w3-border' type='text' name='gloc' value='%GLOC%'>"
+  "<label>%CTYNM%</label></p>"
+  "</fieldset>\n"
+  "<fieldset><legend>LED Display weather data options</legend>"
+  "<p><input name='showtemp' class='w3-check' type='checkbox' %TEMP_CB%> Display Temperature</p>"
+  "<p><input name='showdate' class='w3-check' type='checkbox' %DATE_CB%> Display Date</p>"
+  "<p><input name='showcity' class='w3-check' type='checkbox' %CITY_CB%> Display City Name</p>"
+  "<p><input name='showhighlow' class='w3-check' type='checkbox' %HILO_CB%> Display Current High/Low Temperatures</p>"
+  "<p><input name='showcondition' class='w3-check' type='checkbox' %COND_CB%> Display Weather Condition</p>"
+  "<p><input name='showhumidity' class='w3-check' type='checkbox' %HUM_CB%> Display Humidity</p>"
+  "<p><input name='showwind' class='w3-check' type='checkbox' %WIND_CB%> Display Wind</p>"
+  "<p><input name='showpressure' class='w3-check' type='checkbox' %PRES_CB%> Display Barometric Pressure</p>"
+  "</fieldset>\n"
+  "<fieldset><legend>LED Display scrolling message</legend>"
+  "<p><label>Marquee Message (up to 80 chars)</label><input class='w3-input w3-border' type='text' name='marqueeMsg' value='%MSG%' maxlength='80'></p>"
+  "</fieldset>\n";
+
+static const char webChangeForm2[] PROGMEM =
+  "<fieldset><legend>Data Display settings</legend>"
+  // title='Any selected Display Scrolling Data is shown in short form without movement (scroll) when fitting within display width.'
+  "<p><input name='statdisp' class='w3-check' type='checkbox' %STATDISP_CB%> Do not scroll weather data display</p>"
+  "<p><input name='metric' class='w3-check' type='checkbox' %METRIC_CB%> Use Metric units (Celsius,kmh,mBar); Unchecked: use Imperial units (Farenheid,mph,inHg)</p>"
+  "<p><input name='is24hour' class='w3-check' type='checkbox' %24HR_CB%> Use 24 Hour Clock; Unchecked: use 12 Hour clock</p>"
+  "<p><input name='isPM' class='w3-check' type='checkbox' %PM_CB%> Show PM indicator (only on 12 Hour clock)</p>"
+  "<p><input name='flashseconds' class='w3-check' type='checkbox' %FLASH_CB%> Blink \":\" in the time</p>"
+  "</fieldset>\n"
+  "<fieldset><legend>LED Display Quiet Times</legend>"
+  "<p><label>Quiet time mode &nbsp;&nbsp;&nbsp;</label> <select class='w3-option w3-padding' name='qtmode'>%QTM_OPT%</select></p>"
+  "<p><label>Quiet time dimlevel </label><input class='w3-border' name='qtlvl' type='number' min='0' max='15' value='%QTDIM%'></p>"
+  "<p><label>Start quiet Time &nbsp;</label><input name='qtstrt' type='time' value='%QTST%'></p>"
+  "<p><label>End quiet Time &nbsp;&nbsp;</label><input name='qtend' type='time' value='%QTEND%'></p>"
+  "</fieldset>\n"
+  "<fieldset><legend>LED Display settings</legend>"
+  "<p>Display Brightness <input class='w3-border' name='ledintensity' type='number' min='0' max='15' value='%INTY_OPT%'></p>"
+  "<p>Display Width (in 8x8 pixel tiles) <input class='w3-border' name='displaywidth' type='number' min='4' max='32' value='%DTW_OPT%'></p>"
+  "<p>Display Format for &ge; 8 tiles <select class='w3-option w3-padding' name='wideclockformat' title='Format options for Display with 8 or more tiles' $WCLKDIS$>%WCLK_OPT%</select></p>"
+  "<p>Display Scroll Speed <select class='w3-option w3-padding' name='scrollspeed'>%SCRL_OPT%</select></p>"
+  "<p>Display Scrolling Data interval <input class='w3-border' name='refreshDisplay' type='number' min='1' max='10' value='%RFSH_DISP%'> (minutes)</p>"
+  "<p>Data Refresh interval <select class='w3-option w3-padding' name='refresh'>%RFSH_OPT%</select> (minutes)</p>"
+  "<p><input name='sysled' class='w3-check' type='checkbox' %SYSLED_CB%> Flash System LED on WiFi activity</p>"
+  "</fieldset>\n";
+
+static const char webChangeForm3[] PROGMEM =
+  "<fieldset><legend>Web page settings</legend>"
+  "<p>Theme Color <select class='w3-option w3-padding' name='theme'>%THEME_OPT%</select></p>"
+  "<p><input name='isBasicAuth' class='w3-check' type='checkbox' %AUTH_CB%> Use Security Credentials for Configuration Changes</p>"
+  "<p><label>Configure User ID (for this web interface)</label><input class='w3-input w3-border' type='text' name='userid' value='%CFGUID%' maxlength='20'></p>"
+  "<p><label>Configure Password </label><input class='w3-input w3-border' type='password' name='stationpassword' value='%CFGPW%'></p>"
+  "</fieldset>\n"
+  "<br><button class='w3-button w3-block w3-green w3-section w3-padding' type='submit'>Save</button></form>"
+  "<script>function isNumberKey(e){var h=e.which?e.which:event.keyCode;return!(h>31&&(h<48||h>57))}</script>";
+
+#if COMPILE_MQTT
+static const char webMQTTform[] PROGMEM =
+  "<form class='w3-container' action='/savemqtt' method='get'><h2>MQTT Configuration:</h2>"
+  "<p><input name='displaymqtt' class='w3-check' type='checkbox' %MQTT_CB%> Enable MQTT</p>"
+  "<label>MQTT Address (do not include http://)</label><input class='w3-input w3-border' type='text' name='mqttAddress' id='mqttAddress' value='%MQTT_ADR%' maxlength='60'>"
+  "<label>MQTT Port</label><input class='w3-input w3-border' type='text' name='mqttPort' id='mqttPort' value='%MQTT_PRT%' maxlength='5'  onkeypress='return isNumberKey(event)'>"
+  "<label>MQTT Topic</label><input class='w3-input w3-border' type='text' name='mqttTopic' id='mqttTopic' value='%MQTT_TOP%' maxlength='128'>"
+  "<label>MQTT server User (leave empty when not required) </label><input class='w3-input w3-border' type='text' name='mqttUser' value='%MQTT_USR%' maxlength='30'>"
+  "<label>MQTT server Password </label><input class='w3-input w3-border' type='password' name='mqttPass' value='%MQTT_PW%'>"
+  "<button class='w3-button w3-block w3-green w3-section w3-padding' type='submit'>Save</button></form>"
+  "<script>function isNumberKey(e){var h=e.which?e.which:event.keyCode;return!(h>31&&(h<48||h>57))}</script>";
+#endif
+
+static const char webColorThemes[] PROGMEM =
+  "<option>red</option>"
+  "<option>pink</option>"
+  "<option>purple</option>"
+  "<option>deep-purple</option>"
+  "<option>indigo</option>"
+  "<option>blue</option>"
+  "<option>light-blue</option>"
+  "<option>cyan</option>"
+  "<option>teal</option>"
+  "<option>green</option>"
+  "<option>light-green</option>"
+  "<option>lime</option>"
+  "<option>khaki</option>"
+  "<option>yellow</option>"
+  "<option>amber</option>"
+  "<option>orange</option>"
+  "<option>deep-orange</option>"
+  "<option>blue-grey</option>"
+  "<option>brown</option>"
+  "<option>grey</option>"
+  "<option>dark-grey</option>"
+  "<option>black</option>"
+  "<option>w3schools</option>";
+
+
 
 void setup() {
   Serial.begin(115200);
-  SPIFFS.begin();
-  //SPIFFS.remove(CONFIG);
+  FS.begin();
+  // uncomment for testing, comment for release!
+  //FS.remove(CONFIG);
   delay(10);
 
   // Initialize digital pin for LED
-  pinMode(externalLight, OUTPUT);
+  pinMode(LED_ONBOARD, OUTPUT);
 
   //New Line to clear from start garbage
   Serial.println();
 
-  readCityIds();
+  readConfiguration();
 
-  Serial.println("Number of LED Displays: " + String(numberOfHorizontalDisplays));
-  // initialize dispaly
+  Serial.printf_P(PSTR("LED Display tiles wide: %d\n"), displayWidth);
+  // initialize display
+  matrix = Max72xxPanel(pinCS, displayWidth, displayHeight);
   matrix.setIntensity(0); // Use a value between 0 and 15 for brightness
+  matrix.cp437(true); // use true CP437 (IBM-PC) character font
 
-  int maxPos = numberOfHorizontalDisplays * numberOfVerticalDisplays;
+  int maxPos = displayWidth * displayHeight;
   for (int i = 0; i < maxPos; i++) {
     matrix.setRotation(i, ledRotation);
     matrix.setPosition(i, maxPos - i - 1, 0);
   }
 
-  Serial.println("matrix created");
-  matrix.fillScreen(LOW); // show black
-  centerPrint("hello");
+  Serial.println(F("matrix created"));
+  matrix.fillScreen(CLEARSCREEN);
+  centerPrint(F("hello"));
+  // welcome continued later
 
+#ifdef BUZZER_PIN
   tone(BUZZER_PIN, 415, 500);
   delay(500 * 1.3);
   tone(BUZZER_PIN, 466, 500);
@@ -246,61 +443,40 @@ void setup() {
   tone(BUZZER_PIN, 370, 1000);
   delay(1000 * 1.3);
   noTone(BUZZER_PIN);
+#endif
 
-  for (int inx = 0; inx <= 15; inx++) {
-    matrix.setIntensity(inx);
-    delay(100);
-  }
-  for (int inx = 15; inx >= 0; inx--) {
-    matrix.setIntensity(inx);
-    delay(60);
-  }
-  delay(1000);
-  matrix.setIntensity(displayIntensity);
-  //noTone(BUZZER_PIN);
+  // WiFiManager
+  // ESP_WiFiManager_Lite (multiWifi, Activation on multi reset detect):
 
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  WiFiManager wifiManager;
-
-  // Uncomment for testing wifi manager
-  //wifiManager.resetSettings();
-  wifiManager.setAPCallback(configModeCallback);
-
-  //Custom Station (client) Static IP Configuration - Set custom IP for your Network (IP, Gateway, Subnet mask)
-  //wifiManager.setSTAStaticIPConfig(IPAddress(192,168,0,99), IPAddress(192,168,0,1), IPAddress(255,255,255,0));
-
-  String hostname(HOSTNAME);
+  ESP_WiFiManager = new ESP_WiFiManager_Lite();
+  // Setup Config Portal hostname, without access password
+  String hostname(AP_HOSTNAME_BASE);
   hostname += String(ESP.getChipId(), HEX);
-  if (!wifiManager.autoConnect((const char *)hostname.c_str())) {// new addition
-    delay(3000);
-    WiFi.disconnect(true);
-    ESP.reset();
-    delay(5000);
-  }
+  hostname.toUpperCase();
+  ESP_WiFiManager->setConfigPortal(hostname);
+  // Set customized DHCP HostName
+  ESP_WiFiManager->begin(hostname.c_str());
 
   // print the received signal strength:
-  Serial.print("Signal Strength (RSSI): ");
-  Serial.print(getWifiQuality());
-  Serial.println("%");
+  Serial.printf_P(PSTR("Signal Strength (RSSI): %d%%\n"), getWifiQuality());
 
-  if (ENABLE_OTA) {
+  if (isOTAenabled) {
     ArduinoOTA.onStart([]() {
-      Serial.println("Start");
+      Serial.println(F("Start OTA"));
     });
     ArduinoOTA.onEnd([]() {
-      Serial.println("\nEnd");
+      Serial.println(F("\nEnd OTA"));
     });
     ArduinoOTA.onProgress([](unsigned int progress, unsigned int total) {
-      Serial.printf("Progress: %u%%\r", (progress / (total / 100)));
+      Serial.printf_P(PSTR("Progress: %u%%\r"), (progress / (total / 100)));
     });
     ArduinoOTA.onError([](ota_error_t error) {
-      Serial.printf("Error[%u]: ", error);
-      if (error == OTA_AUTH_ERROR) Serial.println("Auth Failed");
-      else if (error == OTA_BEGIN_ERROR) Serial.println("Begin Failed");
-      else if (error == OTA_CONNECT_ERROR) Serial.println("Connect Failed");
-      else if (error == OTA_RECEIVE_ERROR) Serial.println("Receive Failed");
-      else if (error == OTA_END_ERROR) Serial.println("End Failed");
+      Serial.printf_P(PSTR("OTA Error[%u]: "), error);
+      if (error == OTA_AUTH_ERROR) Serial.println(F("Auth Failed"));
+      else if (error == OTA_BEGIN_ERROR) Serial.println(F("Begin Failed"));
+      else if (error == OTA_CONNECT_ERROR) Serial.println(F("Connect Failed"));
+      else if (error == OTA_RECEIVE_ERROR) Serial.println(F("Receive Failed"));
+      else if (error == OTA_END_ERROR) Serial.println(F("End Failed"));
     });
     ArduinoOTA.setHostname((const char *)hostname.c_str());
     if (OTA_Password != "") {
@@ -309,235 +485,441 @@ void setup() {
     ArduinoOTA.begin();
   }
 
-  if (WEBSERVER_ENABLED) {
-    server.on("/", displayWeatherData);
+  if (!ESP_WiFiManager->isConfigMode()) {
+    // Continue welcome 'hello' for 4.5 to 6 seconds
+    centerPrint(F("hello"));
+    for (int inx = 0; inx <= 15; inx++) {
+      matrix.setIntensity(inx);
+      delay(100);
+    }
+    delay(200);
+    for (int inx = 15; inx >= 0; inx--) {
+      matrix.setIntensity(inx);
+      delay(90);
+    }
+    delay(400);
+    for (int inx = 0; inx <= displayIntensity; inx++) {
+      matrix.setIntensity(inx);
+      delay(100);
+    }
+    delay(800);
+  }
+  matrix.setIntensity(displayIntensity);
+
+  if (isWebserverEnabled) {
+    server.on("/", webDisplayWeatherData);
     server.on("/pull", handlePull);
-    server.on("/locations", handleLocations);
-    server.on("/savebitcoin", handleSaveBitcoin);
-    server.on("/savewideclock", handleSaveWideClock);
-    server.on("/savenews", handleSaveNews);
-    server.on("/saveoctoprint", handleSaveOctoprint);
-    server.on("/savepihole", handleSavePihole);
+    server.on("/saveconfig", handleSaveConfig);
+    #if COMPILE_MQTT
+    server.on("/savemqtt", handleSaveMqtt);
+    #endif
     server.on("/systemreset", handleSystemReset);
     server.on("/forgetwifi", handleForgetWifi);
     server.on("/restart", restartEsp);
     server.on("/configure", handleConfigure);
-    server.on("/configurebitcoin", handleBitcoinConfigure);
-    server.on("/configurewideclock", handleWideClockConfigure);
-    server.on("/configurenews", handleNewsConfigure);
-    server.on("/configureoctoprint", handleOctoprintConfigure);
-    server.on("/configurepihole", handlePiholeConfigure);
+    #if COMPILE_MQTT
+    server.on("/configuremqtt", handleMqttConfigure);
+    #endif
     server.on("/display", handleDisplay);
     server.onNotFound(redirectHome);
     serverUpdater.setup(&server, "/update", www_username, www_password);
     // Start the server
     server.begin();
-    Serial.println("Server started");
+    delay(2000); // wait for 2 seconds to let the server start
+    if (ESP_WiFiManager->isConfigMode()) {
+      Serial.print(F("Config portal started "));
+      scrollMessageWait(F("Wifi Config Mode"));
+      delay(2000);
+    } else if (WiFi.status() == WL_CONNECTED) {
+      Serial.print(F("Server started "));
+    } else {
+      Serial.print(F("Server started but NO WIFI "));
+      scrollMessageWait(F("Server started but no WiFi"));
+      delay(2000);
+    }
     // Print the IP address
-    String webAddress = "http://" + WiFi.localIP().toString() + ":" + String(WEBSERVER_PORT) + "/";
-    Serial.println("Use this URL : " + webAddress);
-    scrollMessage(" v" + String(VERSION) + "  IP: " + WiFi.localIP().toString() + "  ");
-  } else {
-    Serial.println("Web Interface is Disabled");
-    scrollMessage("Web Interface is Disabled");
-  }
+    char webAddress[32];
+    sprintf_P(webAddress, PSTR("v" VERSION "  IP: %s  "),
+      (ESP_WiFiManager->isConfigMode()) ? WiFi.softAPIP().toString().c_str() : WiFi.localIP().toString().c_str());
+    Serial.println(webAddress);
+    scrollMessageWait(webAddress);
+    if (ESP_WiFiManager->isConfigMode()) {
+      String msg = F("Wifi Manager Started... Please Connect to AP: ") + WiFi.softAPSSID() + F(" password: My") + WiFi.softAPSSID();
+      Serial.println(msg);
+      scrollMessageWait(msg);
+      centerPrint(F("wifi"));
+    }
+    // Start NTP , although it can't do anything while in config mode or when no WiFi AP connected
+    timeNTPsetup();
 
+  } else {
+    String msg = F("Web Interface is Disabled");
+    Serial.println(msg);
+    scrollMessageWait(msg);
+  }
+  SCHEDULE_INTERVAL_START(scrlPixelLastTime, 2000);
   flashLED(1, 500);
 }
 
 //************************************************************
-// Main Looop
+// Main Loop
 //************************************************************
 void loop() {
 
-  if ((getMinutesFromLastRefresh() >= minutesBetweenDataRefresh) || lastEpoch == 0) {
-    //Get some Weather Data to serve
-    getWeatherData();
+  if (lastSecond != second()) {
+    lastSecond = second();
+    processEverySecond();
+  }
 
-    // Get prayer times after getWeatherData() because it sets the time.
-    time_t date = now();
-    PrayerTimes prayer_times;
-    double latitude = TimeDB.getLat();    // 42.987;
-    double longitude =  TimeDB.getLon(); // -78.987;
+  if (lastMinute != minute()) {
+    lastMinute = minute();
+    processEveryMinute();
+  }
 
-    double timezone = TimeDB.getTimezone();
-    prayer_times.set_calc_method(PrayerTimes::ISNA);
-    prayer_times.set_asr_method(PrayerTimes::Shafii);
-    prayer_times.set_fajr_angle(15);
-    prayer_times.set_isha_angle(14);
-    prayer_times.set_maghrib_minutes(2);
+  SCHEDULE_INTERVAL(scrlPixelLastTime, displayScrollSpeed, scrollMessageNext);
 
-    double times[PrayerTimes::TimesCount];
-    static const char* TimeName[] =
-    {
-      "Fajr",
-      "Sunrise",
-      "Dhuhr",
-      "Asr",
-      "Sunset",
-      "Maghrib",
-      "Isha",
-    };
+  SCHEDULE_INTERVAL(staticDisplayLastTime, staticDisplayTime, staticDisplayNext);
 
-    Serial.println("Date: " + (String) ctime(&date));
-    Serial.println("Timezone: " + (String) timezone);
-    Serial.println("latitude: " + (String) latitude);
-    Serial.println("longitude: " + (String) longitude);
-
-    prayer_times.get_prayer_times(date, latitude, longitude, timezone, times);
-    prayer_string = "";
-    for (int i = 0; i < PrayerTimes::TimesCount; ++i) {
-      if ( strncmp((char *) TimeName[i], "Sunset", strlen("Sunset")) != 0 ) {
-        prayer_string += (String) TimeName[i] + " " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str() + "    ";
-        Serial.println( (String) TimeName[i] + ": " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str());
+  if (loopState != lastState) {
+    //Serial.printf_P(PSTR("[%u] loopstate %d -> %d\n"), millis()&0xFFFF, lastState, loopState);
+    lastState = loopState;
+  }
+  switch (loopState) {
+  default:
+  case lStateIdle: // Idle: Show time on display, when ON
+      if (isDisplayScrollErrorMsgNew) {
+        scrollMessageSetup(displayScrollErrorMsgStr);
+        if (isDisplayScrollErrorMsgOnce) {
+          isDisplayScrollErrorMsgNew = false;
+          isDisplayScrollErrorMsgOnce = false;
+        }
+        loopState = lStateScrollErrMsgPix;
+      } else
+      if (newMqttMessage != 0 && newMqttMessage[0] != 0) {
+        // if static display mode enabled and message length fits screen
+        if (staticDisplaySetupSingle(newMqttMessage)) {
+          newMqttMessage = NULL;
+          loopState = lStateDispStaticMsg;
+        } else {
+          scrollMessageSetup(newMqttMessage);
+          newMqttMessage = NULL;
+          loopState = lStateScrollNewMqttMsgPix;
+        }
+      } else
+      if (isDisplayMessageNew) {
+        scrollMessageSetup(displayScrollMessageStr);
+        isDisplayMessageNew = false;
+        loopState = lStateScrollMsgPix;
+      } else
+      if (isStaticDisplayNew) {
+        staticDisplaySetup();
+        loopState = lStateDispStaticMsg;
+      } else
+      if (isDisplayTimeNew) {
+        isDisplayTimeNew = false;
+        if (displayOn) {
+          matrix.fillScreen(CLEARSCREEN);
+          centerPrint(displayTime, true);
+        }
       }
-    }
+      break;
+  case lStateScrollMsgPix:
+      if (!scrlBusy) loopState = lStateIdle;
+      break;
+  case lStateScrollNewMqttMsgPix:
+      if (!scrlBusy) loopState = lStateIdle;
+      break;
+  case lStateScrollErrMsgPix:
+      if (!scrlBusy) loopState = lStateIdle;
+      break;
+  case lStateDispStaticMsg:
+      if (!isStaticDisplayNew)  loopState = lStateIdle;
+      break;
+  }
+  if (loopState != lastState) {
+    //Serial.printf_P(PSTR("[%u] loopstate -> %d\n"), millis()&0xFFFF, loopState);
   }
 
 
-  checkDisplay(); // this will see if we need to turn it on or off for night mode.
+  if (isWebserverEnabled) {
+    server.handleClient();
+  }
+  if (isOTAenabled) {
+    ArduinoOTA.handle();
+  }
 
-  if (lastMinute != TimeDB.zeroPad(minute())) {
-    lastMinute = TimeDB.zeroPad(minute());
+  ESP_WiFiManager->run();
+}
 
-    if (weatherClient.getError() != "") {
-      scrollMessage(weatherClient.getError());
-      return;
+void displayScrollMessage(const String &msg)
+{
+  displayScrollMessageStr = msg;
+  isDisplayMessageNew = true;
+}
+
+void displayScrollErrorMessage(const String &msg, bool showOnce)
+{
+  Serial.printf_P(PSTR("setDispERRmsg: %s\n"), msg.c_str());
+  displayScrollErrorMsgStr = msg;
+  isDisplayScrollErrorMsgNew = true;
+  isDisplayScrollErrorMsgOnce = showOnce;
+}
+
+
+void processEveryMinute() {
+  // we can't do anything without being connected to WIFI (TODO: is that true? a (temporary) loss of wifi doesn't render the clock useless...)
+  //if ((WiFi.status() != WL_CONNECTED) && (timeStatus() == timeNotSet)) {
+  if (ESP_WiFiManager->isConfigMode()){
+    return;
+  }
+  if (1) {
+    if (weatherClient.getErrorMessage() != "") {
+      displayScrollErrorMessage(weatherClient.getErrorMessage(), true);
+      //return;
     }
 
     if (displayOn) {
       matrix.shutdown(false);
     }
-    matrix.fillScreen(LOW); // show black
-    if (OCTOPRINT_ENABLED) {
-      if (displayOn && ((printerClient.isOperational() || printerClient.isPrinting()) || printerCount == 0)) {
-        // This should only get called if the printer is actually running or if it has been 2 minutes since last check
-        printerClient.getPrinterJobResults();
-      }
-      printerCount += 1;
-      if (printerCount > 2) {
-        printerCount = 0;
-      }
-    }
+    matrix.fillScreen(CLEARSCREEN);
 
-    displayRefreshCount --;
-    // Check to see if we need to Scroll some Data
-    if (displayRefreshCount <= 0) {
-      displayRefreshCount = minutesBetweenScrolling;
-      String temperature = weatherClient.getTempRounded(0);
-      String description = weatherClient.getDescription(0);
-      description.toUpperCase();
-      String msg;
-      msg += " ";
-      msg += prayer_string;
+    displayRefreshCount--;
+    // Check to see if we need to Scroll some weather Data
+    if ((displayRefreshCount <= 0) && weatherClient.getWeatherDataValid() && (weatherClient.getErrorMessage().length() == 0)) {
+      displayRefreshCount = displayScrollingInterval;
+      String msg = " ";
+      String temperature = String(weatherClient.getTemperature(),0);
+      String weatherDescription = weatherClient.getWeatherDescription();
+      weatherDescription.toUpperCase();
+      staticDisplayIdx = 0;
 
-
-      if (SHOW_DATE) {
-        msg += TimeDB.getDayName() + ", ";
-        msg += TimeDB.getMonthName() + " " + day() + "  ";
+      if (showDate) {
+        if (!isStaticDisplay) {
+          msg += getDayName(weekday()) + ", ";
+          msg += getMonthName(month()) + " " + day() + "  ";
+        } else {
+          if (isMetric) {
+            staticDisplay[staticDisplayIdx] = zeroPad(month()) + "-" + zeroPad(day());
+          } else {
+            staticDisplay[staticDisplayIdx] = zeroPad(day()) + "," + zeroPad(month());
+          }
+          staticDisplayIdx++;
+        }
       }
-      if (SHOW_CITY) {
-        msg += weatherClient.getCity(0) + "  ";
+      if (showCity && !isStaticDisplay) {
+        msg += weatherClient.getCity() + "  ";
       }
-      msg += temperature + getTempSymbol() + "  ";
+      if (showTemperature) {
+        if (!isStaticDisplay) {
+          msg += temperature + getTempSymbol() + "  ";
+        } else {
+          staticDisplay[staticDisplayIdx] = temperature + getTempSymbol();
+          staticDisplayIdx++;
+        }
+      }
 
       //show high/low temperature
-      if (SHOW_HIGHLOW) {
-        msg += "High/Low:" + weatherClient.getHigh(0) + "/" + weatherClient.getLow(0) + " " + getTempSymbol() + "  ";
+      if (showHighLow && !isStaticDisplay) {
+        msg += F("High/Low:") + String(weatherClient.getTemperatureHigh(),0) + "/" + String(weatherClient.getTemperatureLow(),0) + "  ";
       }
-      
-      if (SHOW_CONDITION) {
-        msg += description + "  ";
+      if (showCondition && !isStaticDisplay) {
+        msg += weatherDescription + "  ";
       }
-      if (SHOW_HUMIDITY) {
-        msg += "Humidity:" + weatherClient.getHumidityRounded(0) + "%  ";
-      }
-      if (SHOW_WIND) {
-        msg += "Wind: " + weatherClient.getDirectionText(0) + " @ " + weatherClient.getWindRounded(0) + " " + getSpeedSymbol() + "  ";
-      }
-      //line to show barometric pressure
-      if (SHOW_PRESSURE) {
-        msg += "Pressure:" + weatherClient.getPressure(0) + getPressureSymbol() + "  ";
-      }
-     
-      msg += marqueeMessage + " ";
-      
-      if (NEWS_ENABLED) {
-        msg += "  " + NEWS_SOURCE + ": " + newsClient.getTitle(newsIndex) + "  ";
-        newsIndex += 1;
-        if (newsIndex > 9) {
-          newsIndex = 0;
+      if (showHumidity) {
+        if (!isStaticDisplay) {
+          msg += F("Humidity:") + String(weatherClient.getHumidity()) + "%  ";
+        } else {
+          staticDisplay[staticDisplayIdx] = String(weatherClient.getHumidity()) + ((displayWidth>=6)?"%RH":"%");
+          staticDisplayIdx++;
         }
       }
-      if (OCTOPRINT_ENABLED && printerClient.isPrinting()) {
-        msg += "  " + printerClient.getFileName() + " ";
-        msg += "(" + printerClient.getProgressCompletion() + "%)  ";
-      }
-      if (BitcoinCurrencyCode != "NONE" && BitcoinCurrencyCode != "") {
-        msg += "  Bitcoin: " + bitcoinClient.getRate() + " " + bitcoinClient.getCode() + " ";
-      }
-      if (USE_PIHOLE) {
-        piholeClient.getPiHoleData(PiHoleServer, PiHolePort);
-        piholeClient.getGraphData(PiHoleServer, PiHolePort);
-        if (piholeClient.getPiHoleStatus() != "") {
-          msg += "    Pi-hole (" + piholeClient.getPiHoleStatus() + "): " + piholeClient.getAdsPercentageToday() + "% "; 
+      if (showWind) {
+        String windspeed = String(weatherClient.getWindSpeed(),0);
+        windspeed.trim();
+        if (!isStaticDisplay) {
+          msg += F("Wind:") + weatherClient.getWindDirectionText() + " " + windspeed + getSpeedSymbol() + "  ";
+        } else {
+          // 4 tile display can fit up to "99kmh"
+          staticDisplay[staticDisplayIdx] = windspeed + getSpeedSymbol();
+          staticDisplayIdx++;
         }
       }
-
-      scrollMessage(msg);
-      drawPiholeGraph();
-    }
-  }
-
-  String currentTime = hourMinutes(false);
-
-  if (numberOfHorizontalDisplays >= 8) {
-    if (Wide_Clock_Style == "1") {
-      // On Wide Display -- show the current temperature as well
-      String currentTemp = weatherClient.getTempRounded(0);
-      String timeSpacer = "  ";
-      if (currentTemp.length() >= 3) {
-        timeSpacer = " ";
+      if (showPressure) {
+        if (!isStaticDisplay) {
+          msg += F("Pressure:") + String(weatherClient.getPressure()) + getPressureSymbol() + "  ";
+        } else {
+          // 4 tile display can just fit "999mb", ie. low pressure, Imperial inHg will only fit on 8 tiles
+          staticDisplay[staticDisplayIdx] = String(weatherClient.getPressure()) + getPressureSymbol();
+          staticDisplayIdx++;
+        }
       }
-      currentTime += timeSpacer + currentTemp + getTempSymbol();
-    }
-    if (Wide_Clock_Style == "2") {
-      currentTime += secondsIndicator(false) + TimeDB.zeroPad(second());
-      matrix.fillScreen(LOW); // show black
-    }
-    if (Wide_Clock_Style == "3") {
-      // No change this is normal clock display
-    }
-  }
-  matrix.fillScreen(LOW);
-  centerPrint(currentTime, true);
+      if (marqueeMessage.length() > 0) {
+        msg += marqueeMessage + "  ";
+      }
 
-  if (WEBSERVER_ENABLED) {
-    server.handleClient();
-  }
-  if (ENABLE_OTA) {
-    ArduinoOTA.handle();
+      // Get prayer times
+      time_t date = now();
+      PrayerTimes prayer_times;
+      double latitude = weatherClient.getLat();    // 42.987;
+      double longitude =  weatherClient.getLon(); // -78.987;
+
+      double timezone = weatherClient.getTimeZoneSeconds() / 3600.0;
+      prayer_times.set_calc_method(PrayerTimes::ISNA);
+      prayer_times.set_asr_method(PrayerTimes::Shafii);
+      prayer_times.set_fajr_angle(15);
+      prayer_times.set_isha_angle(14);
+      prayer_times.set_maghrib_minutes(2);
+
+      double times[PrayerTimes::TimesCount];
+      static const char* TimeName[] =
+      {
+        "Fajr",
+        "Sunrise",
+        "Dhuhr",
+        "Asr",
+        "Sunset",
+        "Maghrib",
+        "Isha",
+      };
+
+      Serial.println("Date: " + (String) ctime(&date));
+      Serial.println("Timezone: " + (String) timezone);
+      Serial.println("latitude: " + (String) latitude);
+      Serial.println("longitude: " + (String) longitude);
+
+      prayer_times.get_prayer_times(date, latitude, longitude, timezone, times);
+      for (int i = 0; i < PrayerTimes::TimesCount; ++i) {
+        if ( strncmp((char *) TimeName[i], "Sunset", strlen("Sunset")) != 0 ) {
+          prayer_string += (String) TimeName[i] + " " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str() + "    ";
+          Serial.println( (String) TimeName[i] + ": " + (String) PrayerTimes::float_time_to_time12(times[i]).c_str());
+        }
+      }
+      msg += prayer_string;
+      prayer_string = "";
+
+      #if COMPILE_MQTT
+      if (isMqttEnabled) {
+        char * mqttmsg = mqttClient.getLastMqttMessage();
+        if (strlen(mqttmsg)> 0) {
+          if (isStaticDisplay &&
+            ((int)strlen(mqttmsg) <= ((displayWidth * 8) / 6)))
+          {
+            staticDisplay[staticDisplayIdx] = mqttmsg;
+            staticDisplayIdx++;
+          } else {
+            // add mqtt message if there is one
+            msg += mqttmsg;
+          }
+        }
+      }
+      #endif
+
+      if (isStaticDisplay) {
+
+        if (staticDisplayIdx != 0) {
+          isStaticDisplayNew = true;
+          staticDisplayIdxOut = 0;
+        }
+
+      }
+      if ((msg.length() > 3) && !isQuietPeriodNoBlinkNoscroll) {
+        displayScrollMessage(msg);
+      }
+    }
   }
 }
 
-String hourMinutes(boolean isRefresh) {
-  if (IS_24HOUR) {
-    return hour() + secondsIndicator(isRefresh) + TimeDB.zeroPad(minute());
+void processEverySecond() {
+
+  // we can't do anything without being connected to WIFI (TODO: is that true? a (temporary) loss of wifi doesn't render the clock useless...)
+  //if ((WiFi.status() != WL_CONNECTED) && (timeStatus() == timeNotSet))
+  if (ESP_WiFiManager->isConfigMode())
+    return;
+
+  #if COMPILE_MQTT
+  // allow the mqtt client to do its thing
+  if (isMqttEnabled) {
+    mqttClient.loop();
+    newMqttMessage = mqttClient.getNewMqttMessage();
+  }
+  #endif
+
+  //Get some Weather Data to serve
+  if ((getMinutesFromLastRefresh() >= refreshDataInterval) || lastRefreshDataTimestamp == 0) {
+    getWeatherData();
+  }
+  checkDisplay(); // this will see if we need to turn it on or off for night mode.
+
+  displayTime = hourMinutes(false);
+  isDisplayTimeNew = true;
+  if (displayWidth >= 8) {
+    // wide clock style config, different screen formats for 8+ tiles: HH:MM, HH:MM:SS, HH:MM *CF, HH:MM %RH, mm dd HH:MM,  HH:MM Www DD (12 chars! 8 tiles fit 10 chars! ,
+    // 1=HH:MM, 2=HH:MM:SS, 3=HH:MM *CF, 4=HH:MM %RH, 5=mm dd HH:MM, 6=HH:MM mmdd, 7=HH:MM ddmm, 8=HH:MMWwwDD (or HH:MM Www DD on >= 10 tile display)
+    String add;
+
+    switch (wideClockStyle) {
+    default:
+        /* fall through */
+    case WIDE_CLOCK_STYLE_HHMM:
+        // No change this is normal clock display
+        break;
+    case WIDE_CLOCK_STYLE_HHMMSS:
+        displayTime += secondsIndicator(false) + zeroPad(second());
+        break;
+    case WIDE_CLOCK_STYLE_HHMM_CF:
+        // On Wide Display -- show the current temperature as well
+        add = String(weatherClient.getTemperature(),0);
+        displayTime += " " + add + getTempSymbol();
+        break;
+    case WIDE_CLOCK_STYLE_HHMM_RH:
+        displayTime += " " + String(weatherClient.getHumidity()) + "%";
+        break;
+    case WIDE_CLOCK_STYLE_MMDD_HHMM:
+        add = zeroPad(month())+zeroPad(day());
+        displayTime = add + " " + displayTime;
+        break;
+    case WIDE_CLOCK_STYLE_HHMM_MMDD:
+        add = zeroPad(month())+zeroPad(day());
+        displayTime += " " + add;
+        break;
+    case WIDE_CLOCK_STYLE_HHMM_DDMM:
+        add = zeroPad(day())+zeroPad(month());
+        displayTime += " " + add;
+        break;
+    case WIDE_CLOCK_STYLE_HHMM_WWWDD:
+        String add = getDayName(weekday());
+        if (displayWidth >= 10) {
+          add.remove(3);
+          add = " " + add + " ";
+        } else {
+          add.remove(3);
+        }
+        add += spacePad(day());
+        displayTime += add;
+        break;
+    }
+  }
+}
+
+
+String hourMinutes(bool isRefresh) {
+  if (is24hour) {
+    return spacePad(hour()) + secondsIndicator(isRefresh) + zeroPad(minute());
   } else {
-    return hourFormat12() + secondsIndicator(isRefresh) + TimeDB.zeroPad(minute());
+    return spacePad(hourFormat12()) + secondsIndicator(isRefresh) + zeroPad(minute());
   }
 }
 
-String secondsIndicator(boolean isRefresh) {
-  String rtnValue = ":";
-  if (isRefresh == false && (flashOnSeconds && (second() % 2) == 0)) {
-    rtnValue = " ";
+char secondsIndicator(bool isRefresh) {
+  char rtnValue = ':';
+  if (!isRefresh && !isQuietPeriodNoBlinkNoscroll && flashOnSeconds && ((second() % 2) == 0)) {
+    rtnValue = ' ';
   }
   return rtnValue;
 }
 
-boolean athentication() {
-  if (IS_BASIC_AUTH) {
+bool authentication() {
+  if (isBasicAuth) {
     return server.authenticate(www_username, www_password);
   }
   return true; // Authentication not required
@@ -545,136 +927,112 @@ boolean athentication() {
 
 void handlePull() {
   getWeatherData(); // this will force a data pull for new weather
-  displayWeatherData();
+  webDisplayWeatherData();
 }
 
-void handleSaveBitcoin() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  BitcoinCurrencyCode = server.arg("bitcoincurrency");
-  writeCityIds();
-  bitcoinClient.updateBitcoinData(BitcoinCurrencyCode);  // does nothing if BitCoinCurrencyCode is "NONE" or empty
-  redirectHome();
-}
+#if COMPILE_MQTT
+void handleSaveMqtt() {
+  // test that some important args are present to accept new config
+  if (server.hasArg(F("mqttAddress")) &&
+      server.hasArg(F("mqttPort")) &&
+      server.hasArg(F("mqttTopic"))
+    ) {
 
-void handleSaveWideClock() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  if (numberOfHorizontalDisplays >= 8) {
-    Wide_Clock_Style = server.arg("wideclockformat");
-    writeCityIds();
-    matrix.fillScreen(LOW); // show black
-  }
-  redirectHome();
-}
+    if (!authentication()) {
+      return server.requestAuthentication();
+    }
+    isMqttEnabled = server.hasArg(F("displaymqtt"));
+    MqttServer = server.arg(F("mqttAddress"));
+    MqttPort = server.arg(F("mqttPort")).toInt();
+    MqttTopic = server.arg(F("mqttTopic"));
+    MqttAuthUser = server.arg(F("mqttUser"));
+    MqttAuthPass = server.arg(F("mqttPass"));
 
-void handleSaveNews() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  NEWS_ENABLED = server.hasArg("displaynews");
-  NEWS_API_KEY = server.arg("newsApiKey");
-  NEWS_SOURCE = server.arg("newssource");
-  matrix.fillScreen(LOW); // show black
-  writeCityIds();
-  newsClient.updateNews();
-  redirectHome();
-}
-
-void handleSaveOctoprint() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  OCTOPRINT_ENABLED = server.hasArg("displayoctoprint");
-  OCTOPRINT_PROGRESS = server.hasArg("octoprintprogress");
-  OctoPrintApiKey = server.arg("octoPrintApiKey");
-  OctoPrintServer = server.arg("octoPrintAddress");
-  OctoPrintPort = server.arg("octoPrintPort").toInt();
-  OctoAuthUser = server.arg("octoUser");
-  OctoAuthPass = server.arg("octoPass");
-  matrix.fillScreen(LOW); // show black
-  writeCityIds();
-  if (OCTOPRINT_ENABLED) {
-    printerClient.getPrinterJobResults();
+    writeConfiguration();
   }
   redirectHome();
 }
+#endif
 
-void handleSavePihole() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  USE_PIHOLE = server.hasArg("displaypihole");
-  PiHoleServer = server.arg("piholeAddress");
-  PiHolePort = server.arg("piholePort").toInt();
-  writeCityIds();
-  if (USE_PIHOLE) {
-    piholeClient.getPiHoleData(PiHoleServer, PiHolePort);
-    piholeClient.getGraphData(PiHoleServer, PiHolePort);
+void handleSaveConfig() {
+  bool configChangedMustRestart = false;
+  // test that some important args are present to accept new config
+  if (server.hasArg(F("openWeatherMapApiKey")) &&
+      server.hasArg(F("gloc")) &&
+      server.hasArg(F("marqueeMsg")) &&
+      server.hasArg(F("displaywidth")) &&
+      //server.hasArg(F("startTime")) &&
+      server.hasArg(F("userid")) &&
+      server.hasArg(F("stationpassword")) &&
+      server.hasArg(F("theme")) &&
+      server.hasArg(F("scrollspeed"))
+      ) {
+
+    if (!authentication()) {
+      return server.requestAuthentication();
+    }
+    owmApiKey = server.arg(F("openWeatherMapApiKey"));
+    geoLocation = server.arg(F("gloc"));
+    flashOnSeconds = server.hasArg(F("flashseconds")); // flashOnSeconds means blinking ':' on clock
+    is24hour = server.hasArg(F("is24hour"));
+    isPmIndicator = server.hasArg(F("isPM"));
+    showTemperature = server.hasArg(F("showtemp"));
+    showDate = server.hasArg(F("showdate"));
+    showCity = server.hasArg(F("showcity"));
+    showCondition = server.hasArg(F("showcondition"));
+    showHumidity = server.hasArg(F("showhumidity"));
+    showWind = server.hasArg(F("showwind"));
+    showPressure = server.hasArg(F("showpressure"));
+    showHighLow = server.hasArg(F("showhighlow"));
+    isStaticDisplay = server.hasArg(F("statdisp"));
+    isSysLed = server.hasArg(F("sysled"));
+    isMetric = server.hasArg(F("metric"));
+    marqueeMessage = server.arg(F("marqueeMsg"));
+    quietTimeMode = server.arg(F("qtmode")).toInt();
+    quietTimeDimlevel = server.arg(F("qtlvl")).toInt();
+    String s = server.arg(F("qtstrt"));
+    quietTimeStart = (s.length() > 0) ? TIME_HHMM(s.toInt(),s.substring(s.indexOf(':')+1).toInt()) : -1;
+    s = server.arg(F("qtend"));
+    quietTimeEnd   = (s.length() > 0) ? TIME_HHMM(s.toInt(),s.substring(s.indexOf(':')+1).toInt()) : -1;
+    displayIntensity = server.arg(F("ledintensity")).toInt();
+    int n = server.arg(F("displaywidth")).toInt();
+    if ((displayWidth != n) && (n >= 4) && (n <= 32)) {
+      displayWidth = n;
+      configChangedMustRestart = true;
+    }
+    refreshDataInterval = server.arg(F("refresh")).toInt();
+    themeColor = server.arg(F("theme"));
+    displayScrollingInterval = server.arg(F("refreshDisplay")).toInt();
+    displayScrollSpeed = server.arg(F("scrollspeed")).toInt();
+    wideClockStyle = server.arg(F("wideclockformat")).toInt();
+
+    isBasicAuth = server.hasArg(F("isBasicAuth"));
+    String temp = server.arg(F("userid"));
+    temp.trim();
+    temp.toCharArray(www_username, sizeof(www_username));
+    temp = server.arg(F("stationpassword"));
+    temp.trim();
+    temp.toCharArray(www_password, sizeof(www_password));
+    weatherClient.setMetric(isMetric);
+    weatherClient.setGeoLocation(geoLocation);
+    matrix.fillScreen(CLEARSCREEN);
+    writeConfiguration();
+    Serial.println(F("handleSaveConfig: saved"));
+    getWeatherData(); // this will force a data pull for new weather
   }
   redirectHome();
-}
-
-void handleLocations() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  TIMEDBKEY = server.arg("TimeZoneDB");
-  APIKEY = server.arg("openWeatherMapApiKey");
-  CityIDs[0] = server.arg("city1").toInt();
-  flashOnSeconds = server.hasArg("flashseconds");
-  IS_24HOUR = server.hasArg("is24hour");
-  IS_PM = server.hasArg("isPM");
-  SHOW_DATE = server.hasArg("showdate");
-  SHOW_CITY = server.hasArg("showcity");
-  SHOW_CONDITION = server.hasArg("showcondition");
-  SHOW_HUMIDITY = server.hasArg("showhumidity");
-  SHOW_WIND = server.hasArg("showwind");
-  SHOW_PRESSURE = server.hasArg("showpressure");
-  SHOW_HIGHLOW = server.hasArg("showhighlow");
-  IS_METRIC = server.hasArg("metric");
-  marqueeMessage = decodeHtmlString(server.arg("marqueeMsg"));
-  timeDisplayTurnsOn = decodeHtmlString(server.arg("startTime"));
-  timeDisplayTurnsOff = decodeHtmlString(server.arg("endTime"));
-  displayIntensity = server.arg("ledintensity").toInt();
-  minutesBetweenDataRefresh = server.arg("refresh").toInt();
-  minutesBetweenScrolling = server.arg("refreshDisplay").toInt();
-  displayScrollSpeed = server.arg("scrollspeed").toInt();
-  IS_BASIC_AUTH = server.hasArg("isBasicAuth");
-  String temp = server.arg("userid");
-  temp.toCharArray(www_username, sizeof(temp));
-  temp = server.arg("stationpassword");
-  temp.toCharArray(www_password, sizeof(temp));
-  weatherClient.setMetric(IS_METRIC);
-  matrix.fillScreen(LOW); // show black
-  writeCityIds();
-  getWeatherData(); // this will force a data pull for new weather
-  redirectHome();
+  if (configChangedMustRestart) restartEsp();
 }
 
 void handleSystemReset() {
-  if (!athentication()) {
+  if (!authentication()) {
     return server.requestAuthentication();
   }
-  Serial.println("Reset System Configuration");
-  if (SPIFFS.remove(CONFIG)) {
+  Serial.println(F("Reset System Configuration"));
+  if (FS.remove(CONFIG)) {
     redirectHome();
     ESP.restart();
   }
-}
-
-void handleForgetWifi() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  //WiFiManager
-  //Local intialization. Once its business is done, there is no need to keep it around
-  redirectHome();
-  WiFiManager wifiManager;
-  wifiManager.resetSettings();
-  ESP.restart();
 }
 
 void restartEsp() {
@@ -682,313 +1040,146 @@ void restartEsp() {
   ESP.restart();
 }
 
-void handleBitcoinConfigure() {
-  if (!athentication()) {
+void handleForgetWifi() {
+  if (!authentication()) {
     return server.requestAuthentication();
   }
-  digitalWrite(externalLight, LOW);
-  String html = "";
-
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-
-  sendHeader();
-
-  String form = FPSTR(BITCOIN_FORM);
-  String bitcoinOptions = FPSTR(CURRENCY_OPTIONS);
-  bitcoinOptions.replace(BitcoinCurrencyCode + "'", BitcoinCurrencyCode + "' selected");
-  form.replace("%BITCOINOPTIONS%", bitcoinOptions);
-  server.sendContent(form); //Send another Chunk of form
-
-  sendFooter();
-
-  server.sendContent("");
-  server.client().stop();
-  digitalWrite(externalLight, HIGH);
+  //WiFiManager
+  //Local initialization. Once its business is done, there is no need to keep it around
+  redirectHome();
+  //WiFiManager wifiManager;
+  //wifiManager.resetSettings();
+  //ESP.restart();
+  ESP_WiFiManager->resetAndEnterConfigPortal();
 }
 
-void handleWideClockConfigure() {
-  if (!athentication()) {
+#if COMPILE_MQTT
+void handleMqttConfigure() {
+  if (!authentication()) {
     return server.requestAuthentication();
   }
-  digitalWrite(externalLight, LOW);
-
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
+  onBoardLed(LED_ON);
 
   sendHeader();
 
-  if (numberOfHorizontalDisplays >= 8) {
-    // Wide display options
-    String form = FPSTR(WIDECLOCK_FORM);
-    String clockOptions = "<option value='1'>HH:MM Temperature</option><option value='2'>HH:MM:SS</option><option value='3'>HH:MM</option>";
-    clockOptions.replace(Wide_Clock_Style + "'", Wide_Clock_Style + "' selected");
-    form.replace("%WIDECLOCKOPTIONS%", clockOptions);
-    server.sendContent(form);
-  }
-
-  sendFooter();
-
-  server.sendContent("");
-  server.client().stop();
-  digitalWrite(externalLight, HIGH);
-}
-
-void handleNewsConfigure() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  digitalWrite(externalLight, LOW);
-  
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-
-  sendHeader();
-
-  String form = FPSTR(NEWS_FORM1);
-  String isNewsDisplayedChecked = "";
-  if (NEWS_ENABLED) {
-    isNewsDisplayedChecked = "checked='checked'";
-  }
-  form.replace("%NEWSCHECKED%", isNewsDisplayedChecked);
-  form.replace("%NEWSKEY%", NEWS_API_KEY);
-  form.replace("%NEWSSOURCE%", NEWS_SOURCE);
-  server.sendContent(form); //Send news form
-
-  sendFooter();
-
-  server.sendContent("");
-  server.client().stop();
-  digitalWrite(externalLight, HIGH);
-}
-
-void handleOctoprintConfigure() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  digitalWrite(externalLight, LOW);
-
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-
-  sendHeader();
-
-  String form = FPSTR(OCTO_FORM);
-  String isOctoPrintDisplayedChecked = "";
-  if (OCTOPRINT_ENABLED) {
-    isOctoPrintDisplayedChecked = "checked='checked'";
-  }
-  form.replace("%OCTOCHECKED%", isOctoPrintDisplayedChecked);
-  String isOctoPrintProgressChecked = "";
-  if (OCTOPRINT_PROGRESS) {
-    isOctoPrintProgressChecked = "checked='checked'";
-  }
-  form.replace("%OCTOPROGRESSCHECKED%", isOctoPrintProgressChecked);
-  form.replace("%OCTOKEY%", OctoPrintApiKey);
-  form.replace("%OCTOADDRESS%", OctoPrintServer);
-  form.replace("%OCTOPORT%", String(OctoPrintPort));
-  form.replace("%OCTOUSER%", OctoAuthUser);
-  form.replace("%OCTOPASS%", OctoAuthPass);
-  server.sendContent(form);
-
-  sendFooter();
-
-  server.sendContent("");
-  server.client().stop();
-  digitalWrite(externalLight, HIGH);
-}
-
-void handlePiholeConfigure() {
-  if (!athentication()) {
-    return server.requestAuthentication();
-  }
-  digitalWrite(externalLight, LOW);
-
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-
-  sendHeader();
-
-  server.sendContent(FPSTR(PIHOLE_TEST));
-
-  String form = FPSTR(PIHOLE_FORM);
-  String isPiholeDisplayedChecked = "";
-  if (USE_PIHOLE) {
-    isPiholeDisplayedChecked = "checked='checked'";
-  }
-  form.replace("%PIHOLECHECKED%", isPiholeDisplayedChecked);
-  form.replace("%PIHOLEADDRESS%", PiHoleServer);
-  form.replace("%PIHOLEPORT%", String(PiHolePort));
+  String form = FPSTR(webMQTTform);
+  form.replace(F("%MQTT_CB%"), (isMqttEnabled) ? "checked" : "");
+  form.replace(F("%MQTT_ADR%"), MqttServer);
+  form.replace(F("%MQTT_PRT%"), String(MqttPort));
+  form.replace(F("%MQTT_TOP%"), MqttTopic);
+  form.replace(F("%MQTT_USR%"), MqttAuthUser);
+  form.replace(F("%MQTT_PW%"), MqttAuthPass);
 
   server.sendContent(form);
-  form = "";
-          
+  form.clear();
+
   sendFooter();
 
   server.sendContent("");
   server.client().stop();
-  digitalWrite(externalLight, HIGH);
+  onBoardLed(LED_OFF);
 }
+#endif
 
 void handleConfigure() {
-  if (!athentication()) {
+  if (!authentication()) {
     return server.requestAuthentication();
   }
-  digitalWrite(externalLight, LOW);
-  String html = "";
-
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
+  onBoardLed(LED_ON);
 
   sendHeader();
 
-  String form = FPSTR(CHANGE_FORM1);
-  form.replace("%TIMEDBKEY%", TIMEDBKEY);
-  form.replace("%WEATHERKEY%", APIKEY);
-
-
-  String cityName = "";
-  if (weatherClient.getCity(0) != "") {
-    cityName = weatherClient.getCity(0) + ", " + weatherClient.getCountry(0);
-  }
-  form.replace("%CITYNAME1%", cityName);
-  form.replace("%CITY1%", String(CityIDs[0]));
-  String isDateChecked = "";
-  if (SHOW_DATE) {
-    isDateChecked = "checked='checked'";
-  }
-  form.replace("%DATE_CHECKED%", isDateChecked);
-  String isCityChecked = "";
-  if (SHOW_CITY) {
-    isCityChecked = "checked='checked'";
-  }
-  form.replace("%CITY_CHECKED%", isCityChecked);
-  String isConditionChecked = "";
-  if (SHOW_CONDITION) {
-    isConditionChecked = "checked='checked'";
-  }
-  form.replace("%CONDITION_CHECKED%", isConditionChecked);
-  String isHumidityChecked = "";
-  if (SHOW_HUMIDITY) {
-    isHumidityChecked = "checked='checked'";
-  }
-  form.replace("%HUMIDITY_CHECKED%", isHumidityChecked);
-  String isWindChecked = "";
-  if (SHOW_WIND) {
-    isWindChecked = "checked='checked'";
-  }
-  form.replace("%WIND_CHECKED%", isWindChecked);
-  String isPressureChecked = "";
-  if (SHOW_PRESSURE) {
-    isPressureChecked = "checked='checked'";
-  }
-  form.replace("%PRESSURE_CHECKED%", isPressureChecked);
-
-  String isHighlowChecked = "";
-  if (SHOW_HIGHLOW) {
-    isHighlowChecked = "checked='checked'";
-  }
-  form.replace("%HIGHLOW_CHECKED%", isHighlowChecked);
-
-  
-  String is24hourChecked = "";
-  if (IS_24HOUR) {
-    is24hourChecked = "checked='checked'";
-  }
-  form.replace("%IS_24HOUR_CHECKED%", is24hourChecked);
-  String checked = "";
-  if (IS_METRIC) {
-    checked = "checked='checked'";
-  }
-  form.replace("%CHECKED%", checked);
+  String form = FPSTR(webChangeForm1);
+  form.replace(F("%OWMKEY%"), owmApiKey);
+  form.replace(F("%CTYNM%"), (weatherClient.getCity() != "") ?
+      weatherClient.getCity() + ", " + weatherClient.getCountry() + " @ " + String(weatherClient.getLat(),6) + "," + String(weatherClient.getLon(),6)  : "");
+  form.replace(F("%GLOC%"), geoLocation);
+  form.replace(F("%MSG%"), EncodeHtmlSpecialChars(marqueeMessage.c_str()));
+  form.replace(F("%TEMP_CB%"), (showTemperature) ? "checked" : "");
+  form.replace(F("%DATE_CB%"), (showDate) ? "checked" : "");
+  form.replace(F("%CITY_CB%"), (showCity) ? "checked" : "");
+  form.replace(F("%COND_CB%"), (showCondition) ? "checked" : "");
+  form.replace(F("%HUM_CB%"), (showHumidity) ? "checked" : "");
+  form.replace(F("%WIND_CB%"), (showWind) ? "checked" : "");
+  form.replace(F("%PRES_CB%"), (showPressure) ? "checked" : "");
+  form.replace(F("%HILO_CB%"), (showHighLow) ? "checked" : "");
   server.sendContent(form);
 
-  form = FPSTR(CHANGE_FORM2);
-  String isPmChecked = "";
-  if (IS_PM) {
-    isPmChecked = "checked='checked'";
-  }
-  form.replace("%IS_PM_CHECKED%", isPmChecked);
-  String isFlashSecondsChecked = "";
-  if (flashOnSeconds) {
-    isFlashSecondsChecked = "checked='checked'";
-  }
-  form.replace("%FLASHSECONDS%", isFlashSecondsChecked);
-  form.replace("%MSG%", marqueeMessage);
-  form.replace("%STARTTIME%", timeDisplayTurnsOn);
-  form.replace("%ENDTIME%", timeDisplayTurnsOff);
-  form.replace("%INTENSITYOPTIONS%", String(displayIntensity));
+  form = FPSTR(webChangeForm2);
+  form.replace(F("%24HR_CB%"), (is24hour) ? "checked" : "");
+  form.replace(F("%METRIC_CB%"), (isMetric) ? "checked" : "");
+  form.replace(F("%PM_CB%"), (isPmIndicator) ? "checked" : "");
+  form.replace(F("%FLASH_CB%"), (flashOnSeconds) ? "checked" : "");
+  form.replace(F("%STATDISP_CB%"), (isStaticDisplay) ? "checked" : "");
+  form.replace(F("%END_TM%"), String(quietTimeStart));
+  String qtmode = String(quietTimeMode);
+  String qtmOptions = F("<option value='0'>Disabled</option><option value='1'>Display Off</option><option value='2'>Dimmed</option><option value='3'>Dimmed and No Motion</option>");
+  qtmOptions.replace(qtmode + "'", qtmode + "' selected");
+  form.replace(F("%QTM_OPT%"), String(qtmOptions));
+  form.replace(F("%QTDIM%"), String(quietTimeDimlevel));
+  form.replace(F("%QTST%"), (quietTimeStart<0)? "--:--" : String(zeroPad(quietTimeStart/3600)+':'+zeroPad((quietTimeStart/60)%60)));
+  form.replace(F("%QTEND%"), (quietTimeEnd<0)? "--:--" : String(zeroPad(quietTimeEnd/3600)+':'+zeroPad((quietTimeEnd/60)%60)));
+  form.replace(F("%INTY_OPT%"), String(displayIntensity));
+  form.replace(F("%DTW_OPT%"), String(displayWidth));
   String dSpeed = String(displayScrollSpeed);
-  String scrollOptions = "<option value='35'>Slow</option><option value='25'>Normal</option><option value='15'>Fast</option><option value='10'>Very Fast</option>";
-  scrollOptions.replace(dSpeed + "'", dSpeed + "' selected" );
-  form.replace("%SCROLLOPTIONS%", scrollOptions);
-  String minutes = String(minutesBetweenDataRefresh);
-  String options = "<option>5</option><option>10</option><option>15</option><option>20</option><option>30</option><option>60</option>";
+  String scrollOptions = F("<option value='35'>Slow</option><option value='25'>Normal</option><option value='15'>Fast</option><option value='10'>Very Fast</option>");
+  scrollOptions.replace(dSpeed + "'", dSpeed + "' selected");
+  form.replace(F("%SCRL_OPT%"), scrollOptions);
+  String minutes = String(refreshDataInterval);
+  String options = F("<option>5</option><option>10</option><option>15</option><option>20</option><option>30</option><option>60</option>");
   options.replace(">" + minutes + "<", " selected>" + minutes + "<");
-  form.replace("%OPTIONS%", options);
-  form.replace("%REFRESH_DISPLAY%", String(minutesBetweenScrolling));
+  form.replace(F("%RFSH_OPT%"), options);
+  form.replace(F("%RFSH_DISP%"), String(displayScrollingInterval));
+  form.replace(F("%SYSLED_CB%"), (isSysLed) ? "checked" : "");
+  // Wide display options: 1=HH:MM, 2=HH:MM:SS, 3=HH:MM *CF, 4=HH:MM %RH, 5=mm dd HH:MM, 6=HH:MM mmdd, 7=HH:MM ddmm, 8=HH:MM WwwDD,
+  String clockOptions = F("<option value=1>HH:MM</option><option value=2>HH:MM:SS</option><option value=3>HH:MM *CF</option><option value=4>HH:MM %RH</option><option value=5>mmdd HH:MM</option><option value=6>HH:MM mmdd</option><option value=7>HH:MM ddmm</option><option value=8>HH:MMWwwDD</option>");
+  clockOptions.replace(String(wideClockStyle) + ">", String(wideClockStyle) + F(" selected>"));
+  form.replace(F("%WCLK_OPT%"), clockOptions);
+  if (displayWidth < 8) {
+    form.replace(F("$WCLKDIS$"),F("disabled"));
+  } else {
+    form.replace(F("$WCLKDIS$"),"");
+  }
 
   server.sendContent(form); //Send another chunk of the form
 
-  form = FPSTR(CHANGE_FORM3);
-  String isUseSecurityChecked = "";
-  if (IS_BASIC_AUTH) {
-    isUseSecurityChecked = "checked='checked'";
-  }
-  form.replace("%IS_BASICAUTH_CHECKED%", isUseSecurityChecked);
-  form.replace("%USERID%", String(www_username));
-  form.replace("%STATIONPASSWORD%", String(www_password));
-
+  form = FPSTR(webChangeForm3);
+  String themeOptions = FPSTR(webColorThemes);
+  themeOptions.replace(">" + String(themeColor) + "<", " selected>" + String(themeColor) + "<");
+  form.replace(F("%THEME_OPT%"), themeOptions);
+  form.replace(F("%AUTH_CB%"), (isBasicAuth) ? "checked" : "");
+  form.replace(F("%CFGUID%"), String(www_username));
+  form.replace(F("%CFGPW%"), String(www_password));
   server.sendContent(form); // Send the second chunk of Data
 
   sendFooter();
 
   server.sendContent("");
   server.client().stop();
-  digitalWrite(externalLight, HIGH);
+  onBoardLed(LED_OFF);
 }
 
 void handleDisplay() {
-  if (!athentication()) {
+  if (!authentication()) {
     return server.requestAuthentication();
   }
   enableDisplay(!displayOn);
-  String state = "OFF";
-  if (displayOn) {
-    state = "ON";
-  }
-  displayMessage("Display is now " + state);
+  webDisplayMessage(F("Display is now ") + String((displayOn) ? "ON" : "OFF"));
+  delay(1000);
+  redirectHome();
 }
 
 //***********************************************************************
 void getWeatherData() //client function to send/receive GET request data.
 {
-  digitalWrite(externalLight, LOW);
-  matrix.fillScreen(LOW); // show black
+  onBoardLed(LED_ON);
+  matrix.fillScreen(CLEARSCREEN);
   Serial.println();
 
   if (displayOn) {
     // only pull the weather data if display is on
-    if (firstEpoch != 0) {
-      centerPrint(hourMinutes(true), true);
+    if (firstTimeSync != 0) {
+      centerPrint(displayTime, true);
     } else {
       centerPrint("...");
     }
@@ -998,305 +1189,263 @@ void getWeatherData() //client function to send/receive GET request data.
     matrix.write();
 
     weatherClient.updateWeather();
-    if (weatherClient.getError() != "") {
-      scrollMessage(weatherClient.getError());
+    if (weatherClient.getErrorMessage() != "") {
+      displayScrollErrorMessage(weatherClient.getErrorMessage(), true);
+    } else {
+      // Set current timezone (adapts to DST when region supports that)
+      // when time was potentially changed, stop quick auto sync
+      if (set_timeZoneSec(weatherClient.getTimeZoneSeconds())) {
+        // Stop automatic NTP sync and do it explicitly below
+        setSyncProvider(NULL);
+      }
+    }
+  }
+  lastRefreshDataTimestamp = now();
+
+// With time sync provider (timeNTP) set, the time sync may happen at inconvenient moments, like
+// when scrolling the display causing that to stall.
+// Solution: cancel setup sync provider, and call getNtpTime() here explicitly,
+// then the time update is visualized on the LED display.
+Serial.printf_P(PSTR("Timestatus=%d\n"), timeStatus());  // status timeNeedsSync(1) is NEVER set
+  if (1) { //ALWAYS;   (timeStatus() != timeSet || updateTime) { // when timeNotSet OR timeNeedsSync
+    Serial.println(F("Updating Time..."));
+    //Update the Time
+    matrix.drawPixel(0, 4, HIGH);
+    matrix.drawPixel(0, 3, HIGH);
+    matrix.drawPixel(0, 2, HIGH);
+    matrix.write();
+
+    // Explicitly get the NTP time
+    time_t t = getNtpTime();
+    if (t > TIME_VALID_MIN) {
+      // warning: adding ctime() causes 5kB extra codesize!
+      //Serial.printf_P(PSTR("setTime %u=%s"), uint32_t(t), ctime(&t));
+      Serial.printf_P(PSTR("setTime %u\n"), uint32_t(t));
+      setTime(t);
+    }
+    if (firstTimeSync == 0) {
+      firstTimeSync = now();
+      if (firstTimeSync > TIME_VALID_MIN) {
+        setSyncInterval(222); // used for testing, value doesn't really matter
+        Serial.printf_P(PSTR("firstTimeSync is: %d\n"), firstTimeSync);
+      } else {
+        // on a failed ntp sync we have seen that firstTimeSync was set to a low value: reset firstTimeSync
+        firstTimeSync = 0;
+      }
     }
   }
 
-  Serial.println("Updating Time...");
-  //Update the Time
-  matrix.drawPixel(0, 4, HIGH);
-  matrix.drawPixel(0, 3, HIGH);
-  matrix.drawPixel(0, 2, HIGH);
-  Serial.println("matrix Width:" + matrix.width());
-  matrix.write();
-  TimeDB.updateConfig(TIMEDBKEY, weatherClient.getLat(0), weatherClient.getLon(0));
-  time_t currentTime = TimeDB.getTime();
-  if(currentTime > 5000 || firstEpoch == 0) {
-    setTime(currentTime);
-  } else {
-    Serial.println("Time update unsuccessful!");
-  }
-  lastEpoch = now();
-  if (firstEpoch == 0) {
-    firstEpoch = now();
-    Serial.println("firstEpoch is: " + String(firstEpoch));
-  }
-
-  if (NEWS_ENABLED && displayOn) {
-    matrix.drawPixel(0, 2, HIGH);
-    matrix.drawPixel(0, 1, HIGH);
-    matrix.drawPixel(0, 0, HIGH);
-    matrix.write();
-    Serial.println("Getting News Data for " + NEWS_SOURCE);
-    newsClient.updateNews();
-  }
-
-  if (displayOn) {
-    bitcoinClient.updateBitcoinData(BitcoinCurrencyCode);  // does nothing if BitCoinCurrencyCode is "NONE" or empty
-  }
-
-  Serial.println("Version: " + String(VERSION));
+  Serial.println(F("Version: " VERSION));
   Serial.println();
-  digitalWrite(externalLight, HIGH);
+  onBoardLed(LED_OFF);
 }
 
-void displayMessage(String message) {
-  digitalWrite(externalLight, LOW);
+void webDisplayMessage(const String &message) {
+  onBoardLed(LED_ON);
 
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
   sendHeader();
   server.sendContent(message);
   sendFooter();
   server.sendContent("");
   server.client().stop();
 
-  digitalWrite(externalLight, HIGH);
+  onBoardLed(LED_OFF);
 }
 
 void redirectHome() {
   // Send them back to the Root Directory
-  server.sendHeader("Location", String("/"), true);
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.send(302, "text/plain", "");
+  server.sendHeader(F("Location"), "/", true);
+  server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
+  server.sendHeader(F("Pragma"), F("no-cache"));
+  server.sendHeader(F("Expires"), "-1");
+  server.send(302, F("text/plain"), "");
   server.client().stop();
   delay(1000);
 }
 
-void sendHeader() {
-  String html = "<!DOCTYPE HTML>";
-  html += "<html><head><title>Marquee Scroller</title><link rel='icon' href='data:;base64,='>";
-  html += "<meta http-equiv='Content-Type' content='text/html; charset=UTF-8' />";
-  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
-  html += "<link rel='stylesheet' href='https://www.w3schools.com/w3css/4/w3.css'>";
-  html += "<link rel='stylesheet' href='https://www.w3schools.com/lib/w3-theme-blue-grey.css'>";
-  html += "<link rel='stylesheet' href='https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.8.1/css/all.min.css'>";
-  html += "</head><body>";
+void sendHeader(bool isMainPage) {
+  server.sendHeader(F("Cache-Control"), F("no-cache, no-store"));
+  server.sendHeader(F("Pragma"), F("no-cache"));
+  server.sendHeader(F("Expires"), "-1");
+  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
+  server.send(200, F("text/html"), "");
+
+  String html = FPSTR(webHeaderHtml);
+  html.replace(F("$COLOR$"), themeColor);
   server.sendContent(html);
-  html = "<nav class='w3-sidebar w3-bar-block w3-card' style='margin-top:88px' id='mySidebar'>";
-  html += "<div class='w3-container w3-theme-d2'>";
-  html += "<span onclick='closeSidebar()' class='w3-button w3-display-topright w3-large'><i class='fas fa-times'></i></span>";
-  html += "<div class='w3-left'><img src='http://openweathermap.org/img/w/" + weatherClient.getIcon(0) + ".png' alt='" + weatherClient.getDescription(0) + "'></div>";
-  html += "<div class='w3-padding'>Menu</div></div>";
+  if (isMainPage) {
+    server.sendContent(FPSTR(webHeaderMainPage));
+  }
+  html = FPSTR(webBody1);
+  html.replace(F("$ICO$"), weatherClient.getIcon());
+  html.replace(F("$IDES$"), weatherClient.getWeatherDescription());
   server.sendContent(html);
 
-  server.sendContent(FPSTR(WEB_ACTIONS1));
-  Serial.println("Displays: " + String(numberOfHorizontalDisplays));
-  if (numberOfHorizontalDisplays >= 8) {
-    server.sendContent("<a class='w3-bar-item w3-button' href='/configurewideclock'><i class='far fa-clock'></i> Wide Clock</a>");
-  }
-  server.sendContent(FPSTR(WEB_ACTIONS2));
-  if (displayOn) {
-    server.sendContent("<i class='fas fa-eye-slash'></i> Turn Display OFF");
-  } else {
-    server.sendContent("<i class='fas fa-eye'></i> Turn Display ON");
-  }
-  server.sendContent(FPSTR(WEB_ACTION3));
+  server.sendContent(FPSTR(webActions1));
+  server.sendContent(FPSTR((displayOn)? webActions2_ON:webActions2_OFF));
+  server.sendContent(FPSTR(webActions3));
 
-  html = "</nav>";
-  html += "<header class='w3-top w3-bar w3-theme'><button class='w3-bar-item w3-button w3-xxxlarge w3-hover-theme' onclick='openSidebar()'><i class='fas fa-bars'></i></button><h2 class='w3-bar-item'>Weather Marquee</h2></header>";
-  html += "<script>";
-  html += "function openSidebar(){document.getElementById('mySidebar').style.display='block'}function closeSidebar(){document.getElementById('mySidebar').style.display='none'}closeSidebar();";
-  html += "</script>";
-  html += "<br><div class='w3-container w3-large' style='margin-top:88px'>";
-  server.sendContent(html);
+  server.sendContent(FPSTR(webBody2));
+  if (isMainPage) {
+    server.sendContent(FPSTR(webBody2MainPage));
+  }
 }
 
 void sendFooter() {
   int8_t rssi = getWifiQuality();
-  Serial.print("Signal Strength (RSSI): ");
-  Serial.print(rssi);
-  Serial.println("%");
-  String html = "<br><br><br>";
-  html += "</div>";
-  html += "<footer class='w3-container w3-bottom w3-theme w3-margin-top'>";
-  html += "<i class='far fa-paper-plane'></i> Version: " + String(VERSION) + "<br>";
-  html += "<i class='far fa-clock'></i> Next Update: " + getTimeTillUpdate() + "<br>";
-  html += "<i class='fas fa-rss'></i> Signal Strength: ";
-  html += String(rssi) + "%";
-  html += "</footer>";
-  html += "</body></html>";
+  Serial.printf_P(PSTR("Signal Strength (RSSI): %d%%, %d db\n"), rssi, WiFi.RSSI());
+  String html = FPSTR(webFooterHtml);
+
+  html.replace(F("$UPD$"), getTimeTillUpdate());
+  html.replace(F("$RSSI$"), String(rssi));
   server.sendContent(html);
 }
 
-void displayWeatherData() {
-  digitalWrite(externalLight, LOW);
-  String html = "";
+void webDisplayWeatherData() {
+  onBoardLed(LED_ON);
+  String html;
 
-  server.sendHeader("Cache-Control", "no-cache, no-store");
-  server.sendHeader("Pragma", "no-cache");
-  server.sendHeader("Expires", "-1");
-  server.setContentLength(CONTENT_LENGTH_UNKNOWN);
-  server.send(200, "text/html", "");
-  sendHeader();
+  sendHeader(true);
 
-  String temperature = weatherClient.getTemp(0);
+  String temperature = String(weatherClient.getTemperature(),1);
 
-  if ((temperature.indexOf(".") != -1) && (temperature.length() >= (temperature.indexOf(".") + 2))) {
-    temperature.remove(temperature.indexOf(".") + 2);
+  String dtstr;
+  if (is24hour) {
+    // UK date+time presentation: MSB to LSB
+    dtstr = getDayName(weekday()) + ", " + String(year()) + " " + getMonthName(month()) + " " + day() + " " + zeroPad(hour()) + ":" + zeroPad(minute());
+  } else {
+    // US date+time presentation
+    dtstr = getDayName(weekday()) + ", " + getMonthName(month()) + " " + day() + ", " + hourFormat12() + ":" + zeroPad(minute()) + ", " + getAmPm(isPM());
   }
 
-  String time = TimeDB.getDayName() + ", " + TimeDB.getMonthName() + " " + day() + ", " + hourFormat12() + ":" + TimeDB.zeroPad(minute()) + " " + TimeDB.getAmPm();
+  Serial.print(F("Main page update "));
+  Serial.println(dtstr);
+  //Serial.println(temperature);
+  //Serial.println(weatherClient.getCity());
+  //Serial.println(weatherClient.getWeatherCondition());
+  //Serial.println(weatherClient.getWeatherDescription());
+  Serial.print(F("UpdateTime: "));
+  Serial.println(get24HrColonMin(weatherClient.getReportTimestamp() + weatherClient.getTimeZoneSeconds()));
+  //Serial.print(F("SunRiseTime: "));
+  //Serial.println(get24HrColonMin(weatherClient.getSunRise() + weatherClient.getTimeZoneSeconds()));
+  //Serial.print(F("SunSetTime: "));
+  //Serial.println(get24HrColonMin(weatherClient.getSunSet() + weatherClient.getTimeZoneSeconds()));
 
-  Serial.println(weatherClient.getCity(0));
-  Serial.println(weatherClient.getCondition(0));
-  Serial.println(weatherClient.getDescription(0));
-  Serial.println(temperature);
-  Serial.println(time);
-
-  if (TIMEDBKEY == "") {
-    html += "<p>Please <a href='/configure'>Configure TimeZoneDB</a> with API key.</p>";
+  if (timeStatus() == timeNotSet) {
+    html += F("<p>waiting for first time sync...</p>");
   }
-
-  if (weatherClient.getCity(0) == "") {
-    html += "<p>Please <a href='/configure'>Configure Weather</a> API</p>";
-    if (weatherClient.getError() != "") {
-      html += "<p>Weather Error: <strong>" + weatherClient.getError() + "</strong></p>";
+  if (weatherClient.getCity().length() == 0) {
+    html += F("<p>Waiting for first weather report... , or</p>"
+      "<p>Please <a href='/configure'>Configure Weather</a> API</p>");
+    if (weatherClient.getErrorMessage() != "") {
+      html += F("<p>Weather Error: <strong>") + weatherClient.getErrorMessage() + F("</strong></p>");
     }
   } else {
-    html += "<div class='w3-cell-row' style='width:100%'><h2>" + weatherClient.getCity(0) + ", " + weatherClient.getCountry(0) + "</h2></div><div class='w3-cell-row'>";
-    html += "<div class='w3-cell w3-left w3-medium' style='width:120px'>";
-    html += "<img src='http://openweathermap.org/img/w/" + weatherClient.getIcon(0) + ".png' alt='" + weatherClient.getDescription(0) + "'><br>";
-    html += weatherClient.getHumidity(0) + "% Humidity<br>";
-    html += weatherClient.getDirectionText(0) + " / " + weatherClient.getWind(0) + " <span class='w3-tiny'>" + getSpeedSymbol() + "</span> Wind<br>";
-    html += weatherClient.getPressure(0) + " Pressure<br>";
-    html += "</div>";
-    html += "<div class='w3-cell w3-container' style='width:100%'><p>";
-    html += weatherClient.getCondition(0) + " (" + weatherClient.getDescription(0) + ")<br>";
-    html += temperature + " " + getTempSymbol() + "<br>";
-    html += weatherClient.getHigh(0) + "/" + weatherClient.getLow(0) + " " + getTempSymbol() + "<br>";
-    html += time + "<br>";
-    html += "<a href='https://www.google.com/maps/@" + weatherClient.getLat(0) + "," + weatherClient.getLon(0) + ",10000m/data=!3m1!1e3' target='_BLANK'><i class='fas fa-map-marker' style='color:red'></i> Map It!</a><br>";
-    html += "</p></div></div><hr>";
-  }
-
-
-  server.sendContent(String(html)); // spit out what we got
-  html = ""; // fresh start
-
-
-  if (OCTOPRINT_ENABLED) {
-    html = "<div class='w3-cell-row'>OctoPrint Status: ";
-    if (printerClient.isPrinting()) {
-      html += printerClient.getState() + " " + printerClient.getFileName() + " (" + printerClient.getProgressCompletion() + "%)";
-    } else if (printerClient.isOperational()) {
-      html += printerClient.getState();
-    } else if (printerClient.getError() != "") {
-      html += printerClient.getError();
-    } else {
-      html += "Not Connected";
+    html.reserve(512);
+    html += F(
+      "<div class='w3-cell-row' style='width:100%'><h2>") + weatherClient.getCity() + ", " + weatherClient.getCountry() + F("</h2></div><div class='w3-cell-row'>"
+      "<div class='w3-cell w3-left w3-medium' style='width:120px'>"
+      "<img src='http://openweathermap.org/img/wn/") + weatherClient.getIcon() + "@2x.png' alt='" + weatherClient.getWeatherDescription() + "'><br>" +
+      weatherClient.getHumidity() + F("% <span class='w3-tiny'>RH</span><br>") +
+      weatherClient.getPressure() + F(" <span class='w3-tiny'>") + getPressureSymbol() + F("</span><br>"
+      "Wind ") +
+      weatherClient.getWindDirectionText() + " /<br>&nbsp;&nbsp;" + String(weatherClient.getWindSpeed(),1) + F("&nbsp;<span class='w3-tiny'>") + getSpeedSymbol() + F("</span><br>"
+      "</div>"
+      "<div class='w3-cell w3-container' style='width:100%'><p>");
+    server.sendContent(html);
+    String clouds;
+    if ((weatherClient.getCloudCoverage() > 0) && (weatherClient.getWeatherDescription().indexOf("louds")>0)) {
+       clouds = String(weatherClient.getCloudCoverage()) + " %";
     }
-    html += "</div><br><hr>";
-    server.sendContent(String(html));
-    html = "";
+    html.clear();
+    html.reserve(1024);
+    html +=
+      weatherClient.getWeatherCondition() + " (" + weatherClient.getWeatherDescription() + ") " + clouds + "<br>" +
+      temperature + " " + getTempSymbol(true) + "<br>" +
+      String(weatherClient.getTemperatureHigh(),1) + "/" + String(weatherClient.getTemperatureLow(),1) + " " + getTempSymbol(true) + "<br>"
+      "SunRise " + get24HrColonMin(weatherClient.getSunRise() + weatherClient.getTimeZoneSeconds()) + "<br>"
+      "SunSet " + get24HrColonMin(weatherClient.getSunSet() + weatherClient.getTimeZoneSeconds()) + "<br>"
+      "Updated " + get24HrColonMin(weatherClient.getReportTimestamp() + weatherClient.getTimeZoneSeconds()) +
+      F("<br>"
+        "<a href='https://www.google.com/maps/@") + weatherClient.getLat() + "," + weatherClient.getLon() + F(",10000m/data=!3m1!1e3' target='_BLANK'><i class='fas fa-map-marker' style='color:red'></i> Map It!</a><br>"
+      "</p></div></div>"
+      "<div class='w3-cell-row' style='width:100%'><h3>") + dtstr  + F("</h3></div><hr>");
   }
 
-  if (BitcoinCurrencyCode != "NONE" && BitcoinCurrencyCode != "") {
-    html = "<div class='w3-cell-row'>Bitcoin value: " + bitcoinClient.getRate() + " " + bitcoinClient.getCode() + "</div><br><hr>";
-    server.sendContent(String(html));
-    html = "";
-  }
 
-  if (USE_PIHOLE) {
-    if (piholeClient.getError() == "") {
-      html = "<div class='w3-cell-row'><b>Pi-hole</b><br>"
-             "Total Queries (" + piholeClient.getUniqueClients() + " clients): <b>" + piholeClient.getDnsQueriesToday() + "</b><br>"
-             "Queries Blocked: <b>" + piholeClient.getAdsBlockedToday() + "</b><br>"
-             "Percent Blocked: <b>" + piholeClient.getAdsPercentageToday() + "%</b><br>"
-             "Domains on Blocklist: <b>" + piholeClient.getDomainsBeingBlocked() + "</b><br>"
-             "Status: <b>" + piholeClient.getPiHoleStatus() + "</b><br>"
-             "</div><br><hr>";
+  server.sendContent(html); // spit out what we got
+  html.clear(); // fresh start
+
+  #if COMPILE_MQTT
+  if (isMqttEnabled) {
+    if (mqttClient.getError().length() == 0) {
+      html = F("<div class='w3-cell-row'><b>MQTT</b><br>"
+             "Last Message: <b>") + EncodeHtmlSpecialChars(mqttClient.getLastMqttMessage()) + F("</b><br>"
+             "</div><br><hr>");
     } else {
-      html = "<div class='w3-cell-row'>Pi-hole Error";
-      html += "Please <a href='/configurepihole' title='Configure'>Configure</a> for Pi-hole <a href='/configurepihole' title='Configure'><i class='fas fa-cog'></i></a><br>";
-      html += "Status: Error Getting Data<br>";
-      html += "Reason: " + piholeClient.getError() + "<br></div><br><hr>";
+      html = F("<div class='w3-cell-row'><b>MQTT Error</b><br>"
+             "Please <a href='/configuremqtt' title='Configure'>Configure</a> for MQTT <a href='/configuremqtt' title='Configure'><i class='fas fa-cog'></i></a><br>"
+             "Status: Error Connecting<br>"
+             "Reason: ") + mqttClient.getError() + F("<br></div><br><hr>");
     }
     server.sendContent(html);
-    html = "";
+    html.clear();
   }
-
-  if (NEWS_ENABLED) {
-    html = "<div class='w3-cell-row' style='width:100%'><h2>News (" + NEWS_SOURCE + ")</h2></div>";
-    if (newsClient.getTitle(0) == "") {
-      html += "<p>Please <a href='/configurenews'>Configure News</a> API</p>";
-      server.sendContent(html);
-      html = "";
-    } else {
-      for (int inx = 0; inx < 10; inx++) {
-        html = "<div class='w3-cell-row'><a href='" + newsClient.getUrl(inx) + "' target='_BLANK'>" + newsClient.getTitle(inx) + "</a></div>";
-        html += newsClient.getDescription(inx) + "<br/><br/>";
-        server.sendContent(html);
-        html = "";
-      }
-    }
-  }
+  #endif
 
   sendFooter();
   server.sendContent("");
   server.client().stop();
-  digitalWrite(externalLight, HIGH);
+  onBoardLed(LED_OFF);
 }
 
-void configModeCallback (WiFiManager *myWiFiManager) {
-  Serial.println("Entered config mode");
-  Serial.println(WiFi.softAPIP());
-  Serial.println("Wifi Manager");
-  Serial.println("Please connect to AP");
-  Serial.println(myWiFiManager->getConfigPortalSSID());
-  Serial.println("To setup Wifi Configuration");
-  scrollMessage("Please Connect to AP: " + String(myWiFiManager->getConfigPortalSSID()));
-  centerPrint("wifi");
+
+void onBoardLed(bool on) {
+  if (isSysLed) {
+    digitalWrite(LED_ONBOARD, on);
+  }
 }
 
 void flashLED(int number, int delayTime) {
   for (int inx = 0; inx < number; inx++) {
+#ifdef BUZZER_PIN
     tone(BUZZER_PIN, 440, delayTime);
+#endif
     delay(delayTime);
-    digitalWrite(externalLight, LOW);
+    onBoardLed(LED_ON);
     delay(delayTime);
-    digitalWrite(externalLight, HIGH);
+    onBoardLed(LED_OFF);
     delay(delayTime);
   }
+#ifdef BUZZER_PIN
   noTone(BUZZER_PIN);
+#endif
 }
 
-String getTempSymbol() {
-  String rtnValue = "F";
-  if (IS_METRIC) {
-    rtnValue = "C";
-  }
-  return rtnValue;
+String getTempSymbol(bool forWeb) {
+  // Note: The forWeb degrees character is an UTF8 double byte character!
+  return String((forWeb) ? "°" : String(char(248))) + String((isMetric) ? 'C' : 'F');
 }
 
 String getSpeedSymbol() {
-  String rtnValue = "mph";
-  if (IS_METRIC) {
-    rtnValue = "kph";
-  }
-  return rtnValue;
+  return String((isMetric) ? "kmh" : "mph");
 }
 
 String getPressureSymbol()
 {
-  String rtnValue = "";
-  if (IS_METRIC)
-  {
-    rtnValue = "mb";
-  }
-  return rtnValue;
+  return String((isMetric) ? "mb" : "inHg");
 }
 
 // converts the dBm to a range between 0 and 100%
 int8_t getWifiQuality() {
   int32_t dbm = WiFi.RSSI();
-  if (dbm <= -100) {
+  // found out that RSSI returns 31 when wifi connection is lost
+  // we return -1 in that case
+  if (dbm > 0)
+  {
+    return -1; // wifi error
+  }
+  else if (dbm <= -100) {
     return 0;
   } else if (dbm >= -50) {
     return 100;
@@ -1306,353 +1455,372 @@ int8_t getWifiQuality() {
 }
 
 String getTimeTillUpdate() {
-  String rtnValue = "";
-
-  long timeToUpdate = (((minutesBetweenDataRefresh * 60) + lastEpoch) - now());
+  char hms[10];
+  long timeToUpdate = (((refreshDataInterval * 60) + lastRefreshDataTimestamp) - now());
 
   int hours = numberOfHours(timeToUpdate);
   int minutes = numberOfMinutes(timeToUpdate);
   int seconds = numberOfSeconds(timeToUpdate);
+  sprintf_P(hms, PSTR("%d:%02d:%02d"), hours, minutes, seconds);
 
-  rtnValue += String(hours) + ":";
-  if (minutes < 10) {
-    rtnValue += "0";
-  }
-  rtnValue += String(minutes) + ":";
-  if (seconds < 10) {
-    rtnValue += "0";
-  }
-  rtnValue += String(seconds);
-
-  return rtnValue;
+  return String(hms);
 }
 
 int getMinutesFromLastRefresh() {
-  int minutes = (now() - lastEpoch) / 60;
+  int minutes = (now() - lastRefreshDataTimestamp) / 60;
   return minutes;
 }
 
 int getMinutesFromLastDisplay() {
-  int minutes = (now() - displayOffEpoch) / 60;
+  int minutes = (now() - displayOffTimestamp) / 60;
   return minutes;
 }
 
-void enableDisplay(boolean enable) {
+void enableDisplay(bool enable) {
   displayOn = enable;
   if (enable) {
-    if (getMinutesFromLastDisplay() >= minutesBetweenDataRefresh) {
+    if (getMinutesFromLastDisplay() >= refreshDataInterval) {
       // The display has been off longer than the minutes between refresh -- need to get fresh data
-      lastEpoch = 0; // this should force a data pull of the weather
-      displayOffEpoch = 0;  // reset
+      lastRefreshDataTimestamp = 0; // this should force a data pull of the weather
+      displayOffTimestamp = 0;  // reset
     }
     matrix.shutdown(false);
-    matrix.fillScreen(LOW); // show black
-    Serial.println("Display was turned ON: " + now());
+    matrix.fillScreen(CLEARSCREEN);
+    Serial.println(F("Display was turned ON: ") + get24HrColonMin(now()));
   } else {
     matrix.shutdown(true);
-    Serial.println("Display was turned OFF: " + now());
-    displayOffEpoch = lastEpoch;
+    Serial.println(F("Display was turned OFF: ") + get24HrColonMin(now()));
+    displayOffTimestamp = lastRefreshDataTimestamp;
   }
 }
 
 // Toggle on and off the display if user defined times
-void checkDisplay() {
-  if (timeDisplayTurnsOn == "" || timeDisplayTurnsOff == "") {
+void checkDisplay()
+{
+  if ((quietTimeMode == QTM_DISABLED) || (quietTimeStart <= 0) || (quietTimeEnd <= 0)) {
     return; // nothing to do
   }
-  String currentTime = TimeDB.zeroPad(hour()) + ":" + TimeDB.zeroPad(minute());
+  int currentTime = TIME_HHMM(hour(), minute());
+  if (quietTimeMode == QTM_DISPLAYOFF) {
+    if (currentTime == quietTimeEnd && !displayOn) {
+      Serial.print(F("Time to turn display on: ")); Serial.println(currentTime);
+      flashLED(1, 500);
+      enableDisplay(true);
+    }
 
-  if (currentTime == timeDisplayTurnsOn && !displayOn) {
-    Serial.println("Time to turn display on: " + currentTime);
-    flashLED(1, 500);
-    enableDisplay(true);
+    if (currentTime == quietTimeStart && displayOn) {
+      Serial.print(F("Time to turn display off: ")); Serial.println(currentTime);
+      flashLED(2, 500);
+      enableDisplay(false);
+    }
+  }
+  else { //if (quietTimeMode == QTM_DIMMED || quietTimeMode == QTM_DIMMED_NOSCROLL)
+    if (((quietTimeStart > quietTimeEnd) && ((currentTime>=quietTimeStart)||(currentTime<=quietTimeEnd))) ||
+        ((quietTimeEnd > quietTimeStart) && ((currentTime>=quietTimeStart)&&(currentTime<=quietTimeEnd))) )
+    {
+      // We are in the quiet period
+      matrix.setIntensity(quietTimeDimlevel);
+      isQuietPeriod = true;
+      if (quietTimeMode == QTM_DIMMED_NOSCROLL) {
+        isQuietPeriodNoBlinkNoscroll = true;
+      }
+    } else {
+      // We are outside the quiet period
+      matrix.setIntensity(displayIntensity);
+      isQuietPeriod = false;
+      isQuietPeriodNoBlinkNoscroll = false;
+    }
   }
 
-  if (currentTime == timeDisplayTurnsOff && displayOn) {
-    Serial.println("Time to turn display off: " + currentTime);
-    flashLED(2, 500);
-    enableDisplay(false);
-  }
 }
 
-String writeCityIds() {
-  // Save decoded message to SPIFFS file for playback on power up.
-  File f = SPIFFS.open(CONFIG, "w");
+void writeConfiguration() {
+  // Save decoded message to FS file for playback on power up.
+  File f = FS.open(CONFIG, "w");
   if (!f) {
-    Serial.println("File open failed!");
+    Serial.println(F("File open failed!"));
   } else {
-    Serial.println("Saving settings now...");
-    f.println("TIMEDBKEY=" + TIMEDBKEY);
-    f.println("APIKEY=" + APIKEY);
-    f.println("CityID=" + String(CityIDs[0]));
-    f.println("marqueeMessage=" + marqueeMessage);
-    f.println("newsSource=" + NEWS_SOURCE);
-    f.println("timeDisplayTurnsOn=" + timeDisplayTurnsOn);
-    f.println("timeDisplayTurnsOff=" + timeDisplayTurnsOff);
-    f.println("ledIntensity=" + String(displayIntensity));
-    f.println("scrollSpeed=" + String(displayScrollSpeed));
-    f.println("isNews=" + String(NEWS_ENABLED));
-    f.println("newsApiKey=" + NEWS_API_KEY);
-    f.println("isFlash=" + String(flashOnSeconds));
-    f.println("is24hour=" + String(IS_24HOUR));
-    f.println("isPM=" + String(IS_PM));
-    f.println("wideclockformat=" + Wide_Clock_Style);
-    f.println("isMetric=" + String(IS_METRIC));
-    f.println("refreshRate=" + String(minutesBetweenDataRefresh));
-    f.println("minutesBetweenScrolling=" + String(minutesBetweenScrolling));
-    f.println("isOctoPrint=" + String(OCTOPRINT_ENABLED));
-    f.println("isOctoProgress=" + String(OCTOPRINT_PROGRESS));
-    f.println("octoKey=" + OctoPrintApiKey);
-    f.println("octoServer=" + OctoPrintServer);
-    f.println("octoPort=" + String(OctoPrintPort));
-    f.println("octoUser=" + OctoAuthUser);
-    f.println("octoPass=" + OctoAuthPass);
-    f.println("www_username=" + String(www_username));
-    f.println("www_password=" + String(www_password));
-    f.println("IS_BASIC_AUTH=" + String(IS_BASIC_AUTH));
-    f.println("BitcoinCurrencyCode=" + BitcoinCurrencyCode);
-    f.println("SHOW_CITY=" + String(SHOW_CITY));
-    f.println("SHOW_CONDITION=" + String(SHOW_CONDITION));
-    f.println("SHOW_HUMIDITY=" + String(SHOW_HUMIDITY));
-    f.println("SHOW_WIND=" + String(SHOW_WIND));
-    f.println("SHOW_PRESSURE=" + String(SHOW_PRESSURE));
-    f.println("SHOW_HIGHLOW=" + String(SHOW_HIGHLOW));
-    f.println("SHOW_DATE=" + String(SHOW_DATE));
-    f.println("USE_PIHOLE=" + String(USE_PIHOLE));
-    f.println("PiHoleServer=" + PiHoleServer);
-    f.println("PiHolePort=" + String(PiHolePort));
+    Serial.println(F("Saving settings now..."));
+    f.println(F("APIKEY=") + owmApiKey);
+    f.println(F("CityID=") + geoLocation); // using CityID for backwards compatibility
+    f.println(F("marqueeMessage=") + marqueeMessage);
+    f.println(F("quietTimeStart=") + String(quietTimeStart));
+    f.println(F("quietTimeEnd=") + String(quietTimeEnd));
+    f.println(F("quietTimeMode=") + String(quietTimeMode));
+    f.println(F("quietTimeDimlevel=") + String(quietTimeDimlevel));
+    f.println(F("ledIntensity=") + String(displayIntensity));
+    f.println(F("scrollSpeed=") + String(displayScrollSpeed));
+    f.println(F("isFlash=") + String(flashOnSeconds));
+    f.println(F("is24hour=") + String(is24hour));
+    f.println(F("isPM=") + String(isPmIndicator));
+    f.println(F("isMetric=") + String(isMetric));
+    f.println(F("isStatDisp=") + String(isStaticDisplay));
+    f.println(F("isSysLed=") + String(isSysLed));
+    f.println(F("refreshRate=") + String(refreshDataInterval));
+    f.println(F("dispInterval=") + String(displayScrollingInterval));
+    f.println(F("displayWidth=") + String(displayWidth));
+    f.println(F("wideClockStyle=") + String(wideClockStyle));
+    f.println(F("www_username=") + String(www_username));
+    f.println(F("www_password=") + String(www_password));
+    f.println(F("IS_BASIC_AUTH=") + String(isBasicAuth));
+    f.println(F("SHOW_CITY=") + String(showCity));
+    f.println(F("SHOW_CONDITION=") + String(showCondition));
+    f.println(F("SHOW_HUMIDITY=") + String(showHumidity));
+    f.println(F("SHOW_WIND=") + String(showWind));
+    f.println(F("SHOW_PRESSURE=") + String(showPressure));
+    f.println(F("SHOW_HIGHLOW=") + String(showHighLow));
+    f.println(F("SHOW_DATE=") + String(showDate));
+    f.println(F("SHOW_TEMP=") + String(showTemperature));
+    #if COMPILE_MQTT
+    f.println(F("USE_MQTT=") + String(isMqttEnabled));
+    f.println(F("MqttServer=") + MqttServer);
+    f.println(F("MqttPort=") + String(MqttPort));
+    f.println(F("MqttTopic=") + MqttTopic);
+    f.println(F("MqttUser=") + MqttAuthUser);
+    f.println(F("MqttPass=") + MqttAuthPass);
+    #endif
+    f.println(F("themeColor=") + themeColor);
   }
   f.close();
-  readCityIds();
-  weatherClient.updateCityIdList(CityIDs, 1);
-  String cityIds = weatherClient.getMyCityIDs();
-  return cityIds;
+
+  readConfiguration();
+  weatherClient.setGeoLocation(geoLocation);
 }
 
-void readCityIds() {
-  if (SPIFFS.exists(CONFIG) == false) {
-    Serial.println("Settings File does not yet exists.");
-    writeCityIds();
+void readConfiguration() {
+  if (FS.exists(CONFIG) == false) {
+    Serial.println(F("Settings File does not yet exists."));
+    writeConfiguration();
     return;
   }
-  File fr = SPIFFS.open(CONFIG, "r");
+  Serial.println(F("ReadConfigFile:"));
+  File fr = FS.open(CONFIG, "r");
   String line;
+  int idx;
   while (fr.available()) {
     line = fr.readStringUntil('\n');
-    if (line.indexOf("TIMEDBKEY=") >= 0) {
-      TIMEDBKEY = line.substring(line.lastIndexOf("TIMEDBKEY=") + 10);
-      TIMEDBKEY.trim();
-      Serial.println("TIMEDBKEY: " + TIMEDBKEY);
-    }
-    if (line.indexOf("APIKEY=") >= 0) {
-      APIKEY = line.substring(line.lastIndexOf("APIKEY=") + 7);
-      APIKEY.trim();
-      Serial.println("APIKEY: " + APIKEY);
-    }
-    if (line.indexOf("CityID=") >= 0) {
-      CityIDs[0] = line.substring(line.lastIndexOf("CityID=") + 7).toInt();
-      Serial.println("CityID: " + String(CityIDs[0]));
-    }
-    if (line.indexOf("newsSource=") >= 0) {
-      NEWS_SOURCE = line.substring(line.lastIndexOf("newsSource=") + 11);
-      NEWS_SOURCE.trim();
-      Serial.println("newsSource=" + NEWS_SOURCE);
-    }
-    if (line.indexOf("isNews=") >= 0) {
-      NEWS_ENABLED = line.substring(line.lastIndexOf("isNews=") + 7).toInt();
-      Serial.println("NEWS_ENABLED=" + String(NEWS_ENABLED));
-    }
-    if (line.indexOf("newsApiKey=") >= 0) {
-      NEWS_API_KEY = line.substring(line.lastIndexOf("newsApiKey=") + 11);
-      NEWS_API_KEY.trim();
-      Serial.println("NEWS_API_KEY: " + NEWS_API_KEY);
-    }
-    if (line.indexOf("isFlash=") >= 0) {
-      flashOnSeconds = line.substring(line.lastIndexOf("isFlash=") + 8).toInt();
-      Serial.println("flashOnSeconds=" + String(flashOnSeconds));
-    }
-    if (line.indexOf("is24hour=") >= 0) {
-      IS_24HOUR = line.substring(line.lastIndexOf("is24hour=") + 9).toInt();
-      Serial.println("IS_24HOUR=" + String(IS_24HOUR));
-    }
-    if (line.indexOf("isPM=") >= 0) {
-      IS_PM = line.substring(line.lastIndexOf("isPM=") + 5).toInt();
-      Serial.println("IS_PM=" + String(IS_PM));
-    }
-    if (line.indexOf("wideclockformat=") >= 0) {
-      Wide_Clock_Style = line.substring(line.lastIndexOf("wideclockformat=") + 16);
-      Wide_Clock_Style.trim();
-      Serial.println("Wide_Clock_Style=" + Wide_Clock_Style);
-    }
-    if (line.indexOf("isMetric=") >= 0) {
-      IS_METRIC = line.substring(line.lastIndexOf("isMetric=") + 9).toInt();
-      Serial.println("IS_METRIC=" + String(IS_METRIC));
-    }
-    if (line.indexOf("refreshRate=") >= 0) {
-      minutesBetweenDataRefresh = line.substring(line.lastIndexOf("refreshRate=") + 12).toInt();
-      if (minutesBetweenDataRefresh == 0) {
-        minutesBetweenDataRefresh = 15; // can't be zero
+    line.trim();
+    //print each line read
+    if (1) {
+      idx = line.indexOf("Key");
+      if (idx < 0) idx = line.indexOf("KEY");
+      if (idx < 0) idx = line.indexOf("Pass");
+      if (idx > 0) idx = line.indexOf("=");
+      if ((idx > 0) && (line.substring(idx+1).length() > 0)) {
+        // do not print keys or passwords
+        Serial.print(line.substring(0,idx+1));
+        Serial.println("***");
+      } else {
+        Serial.println(line);
       }
-      Serial.println("minutesBetweenDataRefresh=" + String(minutesBetweenDataRefresh));
     }
-    if (line.indexOf("minutesBetweenScrolling=") >= 0) {
+    if ((idx = line.indexOf(F("APIKEY="))) >= 0) {
+      owmApiKey = line.substring(idx + 7);
+    }
+    if ((idx = line.indexOf(F("CityID="))) >= 0) {
+       // using CityID for backwards compatibility
+      geoLocation = line.substring(idx + 7);
+    }
+    if ((idx = line.indexOf(F("isFlash="))) >= 0) {
+      flashOnSeconds = line.substring(idx + 8).toInt();
+    }
+    if ((idx = line.indexOf(F("is24hour="))) >= 0) {
+      is24hour = line.substring(idx + 9).toInt();
+    }
+    if ((idx = line.indexOf(F("isPM="))) >= 0) {
+      isPmIndicator = line.substring(idx + 5).toInt();
+    }
+    if ((idx = line.indexOf(F("wideclockformat="))) >= 0) {
+      /* for backwards compatibility settings migration */
+      //OLD: "1"="hh:mm Temp", "2"="hh:mm:ss", "3"="hh:mm"
+      int n = line.substring(idx + 16).toInt();
+      if (n == 1) wideClockStyle = WIDE_CLOCK_STYLE_HHMM_CF;
+      if (n == 2) wideClockStyle = WIDE_CLOCK_STYLE_HHMMSS;
+      if (n == 3) wideClockStyle = WIDE_CLOCK_STYLE_HHMM;
+      // else: keep default
+    }
+    if ((idx = line.indexOf(F("wideClockStyle="))) >= 0) {
+      int n = line.substring(idx + 15).toInt();
+      if (n < WIDE_CLOCK_STYLE_FIRST || n > WIDE_CLOCK_STYLE_LAST) n = 1;
+      if (wideClockStyle != n) {
+        Serial.printf_P(PSTR("wideClockStyle changed %d->%d\n"), wideClockStyle, n);
+        wideClockStyle = n;
+      }
+    }
+    if ((idx = line.indexOf(F("isMetric="))) >= 0) {
+      isMetric = line.substring(idx + 9).toInt();
+    }
+    if ((idx = line.indexOf(F("isStatDisp="))) >= 0) {
+      isStaticDisplay = line.substring(idx + 11).toInt();
+    }
+    if ((idx = line.indexOf(F("isSysLed="))) >= 0) {
+      isSysLed = line.substring(idx + 9).toInt();
+    }
+    if ((idx = line.indexOf(F("refreshRate="))) >= 0) {
+      refreshDataInterval = line.substring(idx + 12).toInt();
+      if (refreshDataInterval == 0) {
+        refreshDataInterval = 15; // can't be zero
+      }
+    }
+    if ((idx = line.indexOf(F("minutesBetweenScrolling="))) >= 0) {  /* for backwards compatibility settings migration */
       displayRefreshCount = 1;
-      minutesBetweenScrolling = line.substring(line.lastIndexOf("minutesBetweenScrolling=") + 24).toInt();
-      Serial.println("minutesBetweenScrolling=" + String(minutesBetweenScrolling));
+      displayScrollingInterval = line.substring(idx + 24).toInt();
     }
-    if (line.indexOf("marqueeMessage=") >= 0) {
-      marqueeMessage = line.substring(line.lastIndexOf("marqueeMessage=") + 15);
-      marqueeMessage.trim();
-      Serial.println("marqueeMessage=" + marqueeMessage);
+    if ((idx = line.indexOf(F("displayInterval="))) >= 0) {
+      displayRefreshCount = 1;
+      displayScrollingInterval = line.substring(idx + 16).toInt();
     }
-    if (line.indexOf("timeDisplayTurnsOn=") >= 0) {
-      timeDisplayTurnsOn = line.substring(line.lastIndexOf("timeDisplayTurnsOn=") + 19);
-      timeDisplayTurnsOn.trim();
-      Serial.println("timeDisplayTurnsOn=" + timeDisplayTurnsOn);
+    if ((idx = line.indexOf(F("displayWidth="))) >= 0) {
+      int n = line.substring(idx + 13).toInt();
+      if ((n < 4) && (n > 32)) n = 4;
+      if (displayWidth != n) {
+        Serial.printf_P(PSTR("displayWidth changed %d->%d\n"), displayWidth, n);
+        displayWidth = n;
+      }
     }
-    if (line.indexOf("timeDisplayTurnsOff=") >= 0) {
-      timeDisplayTurnsOff = line.substring(line.lastIndexOf("timeDisplayTurnsOff=") + 20);
-      timeDisplayTurnsOff.trim();
-      Serial.println("timeDisplayTurnsOff=" + timeDisplayTurnsOff);
+    if ((idx = line.indexOf(F("marqueeMessage="))) >= 0) {
+      marqueeMessage = line.substring(idx + 15);
     }
-    if (line.indexOf("ledIntensity=") >= 0) {
-      displayIntensity = line.substring(line.lastIndexOf("ledIntensity=") + 13).toInt();
-      Serial.println("displayIntensity=" + String(displayIntensity));
+    if ((idx = line.indexOf(F("quietTimeMode="))) >= 0) {
+      quietTimeMode = line.substring(idx + 14).toInt();
     }
-    if (line.indexOf("scrollSpeed=") >= 0) {
-      displayScrollSpeed = line.substring(line.lastIndexOf("scrollSpeed=") + 12).toInt();
-      Serial.println("displayScrollSpeed=" + String(displayScrollSpeed));
+    if ((idx = line.indexOf(F("quietTimeDimlevel="))) >= 0) {
+      quietTimeDimlevel = line.substring(idx + 18).toInt();
     }
-    if (line.indexOf("isOctoPrint=") >= 0) {
-      OCTOPRINT_ENABLED = line.substring(line.lastIndexOf("isOctoPrint=") + 12).toInt();
-      Serial.println("OCTOPRINT_ENABLED=" + String(OCTOPRINT_ENABLED));
+    if ((idx = line.indexOf(F("quietTimeStart="))) >= 0) {
+      quietTimeStart = line.substring(idx + 15).toInt();
     }
-    if (line.indexOf("isOctoProgress=") >= 0) {
-      OCTOPRINT_PROGRESS = line.substring(line.lastIndexOf("isOctoProgress=") + 15).toInt();
-      Serial.println("OCTOPRINT_PROGRESS=" + String(OCTOPRINT_PROGRESS));
+    if ((idx = line.indexOf(F("quietTimeEnd="))) >= 0) {
+      quietTimeEnd = line.substring(idx + 13).toInt();
     }
-    if (line.indexOf("octoKey=") >= 0) {
-      OctoPrintApiKey = line.substring(line.lastIndexOf("octoKey=") + 8);
-      OctoPrintApiKey.trim();
-      Serial.println("OctoPrintApiKey=" + OctoPrintApiKey);
+    if ((idx = line.indexOf(F("ledIntensity="))) >= 0) {
+      displayIntensity = line.substring(idx + 13).toInt();
     }
-    if (line.indexOf("octoServer=") >= 0) {
-      OctoPrintServer = line.substring(line.lastIndexOf("octoServer=") + 11);
-      OctoPrintServer.trim();
-      Serial.println("OctoPrintServer=" + OctoPrintServer);
+    if ((idx = line.indexOf(F("scrollSpeed="))) >= 0) {
+      displayScrollSpeed = line.substring(idx + 12).toInt();
     }
-    if (line.indexOf("octoPort=") >= 0) {
-      OctoPrintPort = line.substring(line.lastIndexOf("octoPort=") + 9).toInt();
-      Serial.println("OctoPrintPort=" + String(OctoPrintPort));
+    if ((idx = line.indexOf(F("www_username="))) >= 0) {
+      String temp = line.substring(idx + 13);
+      temp.toCharArray(www_username, sizeof(www_username));
     }
-    if (line.indexOf("octoUser=") >= 0) {
-      OctoAuthUser = line.substring(line.lastIndexOf("octoUser=") + 9);
-      OctoAuthUser.trim();
-      Serial.println("OctoAuthUser=" + OctoAuthUser);
+    if ((idx = line.indexOf(F("www_password="))) >= 0) {
+      String temp = line.substring(idx + 13);
+      temp.toCharArray(www_password, sizeof(www_password));
     }
-    if (line.indexOf("octoPass=") >= 0) {
-      OctoAuthPass = line.substring(line.lastIndexOf("octoPass=") + 9);
-      OctoAuthPass.trim();
-      Serial.println("OctoAuthPass=" + OctoAuthPass);
+    if ((idx = line.indexOf(F("IS_BASIC_AUTH="))) >= 0) {
+      isBasicAuth = line.substring(idx + 14).toInt();
     }
-    if (line.indexOf("www_username=") >= 0) {
-      String temp = line.substring(line.lastIndexOf("www_username=") + 13);
-      temp.trim();
-      temp.toCharArray(www_username, sizeof(temp));
-      Serial.println("www_username=" + String(www_username));
+    if ((idx = line.indexOf(F("SHOW_CITY="))) >= 0) {
+      showCity = line.substring(idx + 10).toInt();
     }
-    if (line.indexOf("www_password=") >= 0) {
-      String temp = line.substring(line.lastIndexOf("www_password=") + 13);
-      temp.trim();
-      temp.toCharArray(www_password, sizeof(temp));
-      Serial.println("www_password=" + String(www_password));
+    if ((idx = line.indexOf(F("SHOW_CONDITION="))) >= 0) {
+      showCondition = line.substring(idx + 15).toInt();
     }
-    if (line.indexOf("IS_BASIC_AUTH=") >= 0) {
-      IS_BASIC_AUTH = line.substring(line.lastIndexOf("IS_BASIC_AUTH=") + 14).toInt();
-      Serial.println("IS_BASIC_AUTH=" + String(IS_BASIC_AUTH));
+    if ((idx = line.indexOf(F("SHOW_HUMIDITY="))) >= 0) {
+      showHumidity = line.substring(idx + 14).toInt();
     }
-    if (line.indexOf("BitcoinCurrencyCode=") >= 0) {
-      BitcoinCurrencyCode = line.substring(line.lastIndexOf("BitcoinCurrencyCode=") + 20);
-      BitcoinCurrencyCode.trim();
-      Serial.println("BitcoinCurrencyCode=" + BitcoinCurrencyCode);
+    if ((idx = line.indexOf(F("SHOW_WIND="))) >= 0) {
+      showWind = line.substring(idx + 10).toInt();
     }
-    if (line.indexOf("SHOW_CITY=") >= 0) {
-      SHOW_CITY = line.substring(line.lastIndexOf("SHOW_CITY=") + 10).toInt();
-      Serial.println("SHOW_CITY=" + String(SHOW_CITY));
+    if ((idx = line.indexOf(F("SHOW_PRESSURE="))) >= 0) {
+      showPressure = line.substring(idx + 14).toInt();
     }
-    if (line.indexOf("SHOW_CONDITION=") >= 0) {
-      SHOW_CONDITION = line.substring(line.lastIndexOf("SHOW_CONDITION=") + 15).toInt();
-      Serial.println("SHOW_CONDITION=" + String(SHOW_CONDITION));
+    if ((idx = line.indexOf(F("SHOW_HIGHLOW="))) >= 0) {
+      showHighLow = line.substring(idx + 13).toInt();
     }
-    if (line.indexOf("SHOW_HUMIDITY=") >= 0) {
-      SHOW_HUMIDITY = line.substring(line.lastIndexOf("SHOW_HUMIDITY=") + 14).toInt();
-      Serial.println("SHOW_HUMIDITY=" + String(SHOW_HUMIDITY));
+    if ((idx = line.indexOf(F("SHOW_DATE="))) >= 0) {
+      showDate = line.substring(idx + 10).toInt();
     }
-    if (line.indexOf("SHOW_WIND=") >= 0) {
-      SHOW_WIND = line.substring(line.lastIndexOf("SHOW_WIND=") + 10).toInt();
-      Serial.println("SHOW_WIND=" + String(SHOW_WIND));
+    if ((idx = line.indexOf(F("SHOW_TEMP="))) >= 0) {
+      showTemperature = line.substring(idx + 10).toInt();
     }
-    if (line.indexOf("SHOW_PRESSURE=") >= 0) {
-      SHOW_PRESSURE = line.substring(line.lastIndexOf("SHOW_PRESSURE=") + 14).toInt();
-      Serial.println("SHOW_PRESSURE=" + String(SHOW_PRESSURE));
+    #if COMPILE_MQTT
+    if ((idx = line.indexOf(F("USE_MQTT="))) >= 0) {
+      isMqttEnabled = line.substring(idx + 9).toInt();
     }
-
-    if (line.indexOf("SHOW_HIGHLOW=") >= 0) {
-      SHOW_HIGHLOW = line.substring(line.lastIndexOf("SHOW_HIGHLOW=") + 13).toInt();
-      Serial.println("SHOW_HIGHLOW=" + String(SHOW_HIGHLOW));
+    if ((idx = line.indexOf(F("MqttServer="))) >= 0) {
+      MqttServer = line.substring(idx + 11);
     }
-    
-    if (line.indexOf("SHOW_DATE=") >= 0) {
-      SHOW_DATE = line.substring(line.lastIndexOf("SHOW_DATE=") + 10).toInt();
-      Serial.println("SHOW_DATE=" + String(SHOW_DATE));
+    if ((idx = line.indexOf(F("MqttPort="))) >= 0) {
+      MqttPort = line.substring(idx + 9).toInt();
     }
-    if (line.indexOf("USE_PIHOLE=") >= 0) {
-      USE_PIHOLE = line.substring(line.lastIndexOf("USE_PIHOLE=") + 11).toInt();
-      Serial.println("USE_PIHOLE=" + String(USE_PIHOLE));
+    if ((idx = line.indexOf(F("MqttTopic="))) >= 0) {
+      MqttTopic = line.substring(idx + 10);
     }
-    if (line.indexOf("PiHoleServer=") >= 0) {
-      PiHoleServer = line.substring(line.lastIndexOf("PiHoleServer=") + 13);
-      PiHoleServer.trim();
-      Serial.println("PiHoleServer=" + PiHoleServer);
+    if ((idx = line.indexOf(F("MqttUser="))) >= 0) {
+      MqttAuthUser = line.substring(idx + 9);
     }
-    if (line.indexOf("PiHolePort=") >= 0) {
-      PiHolePort = line.substring(line.lastIndexOf("PiHolePort=") + 11).toInt();
-      Serial.println("PiHolePort=" + String(PiHolePort));
+    if ((idx = line.indexOf(F("MqttPass="))) >= 0) {
+      MqttAuthPass = line.substring(idx + 9);
+    }
+    #endif
+    if ((idx = line.indexOf(F("themeColor="))) >= 0) {
+      themeColor = line.substring(idx + 11);
     }
   }
   fr.close();
+  Serial.println(F("ReadConfigFile EOF"));
   matrix.setIntensity(displayIntensity);
-  newsClient.updateNewsClient(NEWS_API_KEY, NEWS_SOURCE);
-  weatherClient.updateWeatherApiKey(APIKEY);
-  weatherClient.setMetric(IS_METRIC);
-  weatherClient.updateCityIdList(CityIDs, 1);
-  printerClient.updateOctoPrintClient(OctoPrintApiKey, OctoPrintServer, OctoPrintPort, OctoAuthUser, OctoAuthPass);
+  weatherClient.setWeatherApiKey(owmApiKey);
+  weatherClient.setMetric(isMetric);
+  weatherClient.setGeoLocation(geoLocation);
+  #if COMPILE_MQTT
+  mqttClient.updateMqttClient(MqttServer, MqttPort, MqttTopic, MqttAuthUser, MqttAuthPass);
+  #endif
 }
 
-void scrollMessage(String msg) {
-  msg += " "; // add a space at the end
-  for ( int i = 0 ; i < width * msg.length() + matrix.width() - 1 - spacer; i++ ) {
-    if (WEBSERVER_ENABLED) {
+void scrollMessageSetup(const String &msg) {
+  scrlMsg = msg + " "; // add one more space at the end
+  scrlMsgLen = (int)msg.length();
+  scrlPixTotal = (font_width * (int)msg.length() + (matrix.width() - 1) - font_space);
+  scrlPixY = (matrix.height() - 8) / 2; // center the text vertically
+  scrlPixIdx = 0;
+  scrlBusy = true;
+  SCHEDULE_INTERVAL_START(scrlPixelLastTime,100);
+}
+
+// Call this every <displayScrollSpeed> ms
+bool scrollMessageNext() {
+  if (scrlBusy) {
+    int msgIdx = scrlPixIdx / font_width;
+    int x = (matrix.width() - 1) - scrlPixIdx % font_width;
+    matrix.fillScreen(CLEARSCREEN);
+    while (((x + font_width - font_space) >= 0) && msgIdx >= 0) {
+      if (msgIdx < scrlMsgLen) {
+        matrix.drawChar(x, scrlPixY, scrlMsg[msgIdx], 1/*FGcolor*/, 0/*BGcolor*/, 1/*sizefactor*/);
+      }
+      msgIdx--;
+      x -= font_width;
+    }
+    // TODO: perform matrix.write() on HW timer interrupt for more exact timings
+    matrix.write(); // Send bitmap to display
+    scrlPixIdx++;
+  }
+  scrlBusy = scrlPixIdx < scrlPixTotal;
+  return scrlBusy;
+}
+
+void scrollMessageWait(const String &msg) {
+  for (int i = 0; i < (font_width * (int)msg.length() + (matrix.width())); i++) {
+    if (isWebserverEnabled) {
       server.handleClient();
     }
-    if (ENABLE_OTA) {
+    if (isOTAenabled) {
       ArduinoOTA.handle();
     }
-    if (refresh == 1) i = 0;
-    refresh = 0;
-    matrix.fillScreen(LOW);
+    matrix.fillScreen(CLEARSCREEN);
 
-    int letter = i / width;
-    int x = (matrix.width() - 1) - i % width;
+    int letter = i / font_width;
+    int x = (matrix.width() - 1) - i % font_width;
     int y = (matrix.height() - 8) / 2; // center the text vertically
 
-    while ( x + width - spacer >= 0 && letter >= 0 ) {
-      if ( letter < msg.length() ) {
+    while (((x + font_width - font_space) >= 0) && letter >= 0) {
+      if (letter < (int)msg.length()) {
         matrix.drawChar(x, y, msg[letter], HIGH, LOW, 1);
       }
 
       letter--;
-      x -= width;
+      x -= font_width;
     }
 
     matrix.write(); // Send bitmap to display
@@ -1661,103 +1829,142 @@ void scrollMessage(String msg) {
   matrix.setCursor(0, 0);
 }
 
-void drawPiholeGraph() {
-  if (!USE_PIHOLE || piholeClient.getBlockedCount() == 0) {
-    return;
-  }
-  int count = piholeClient.getBlockedCount();
-  int high = 0;
-  int row = matrix.width() - 1;
-  int yval = 0;
-
-  int totalRows = count - matrix.width();
-  
-  if (totalRows < 0) {
-    totalRows = 0;
-  }
-
-  // get the high value for the sample that will be on the screen
-  for (int inx = count; inx >= totalRows; inx--) {
-    if (piholeClient.getBlockedAds()[inx] > high) {
-      high = (int)piholeClient.getBlockedAds()[inx];
-    }
-  }
-
-  int currentVal = 0;
-  for (int inx = (count-1); inx >= totalRows; inx--) {
-    currentVal = (int)piholeClient.getBlockedAds()[inx];
-    yval = map(currentVal, 0, high, 7, 0);
-    //Serial.println("Value: " + String(currentVal));
-    //Serial.println("x: " + String(row) + " y:" + String(yval) + " h:" + String(8-yval));
-    matrix.drawFastVLine(row, yval, 8-yval, HIGH);
-    if (row == 0) {
-      break;
-    }
-    row--;
-  }
-  matrix.write();
-  for (int wait = 0; wait < 500; wait++) {
-    if (WEBSERVER_ENABLED) {
-      server.handleClient();
-    }
-    if (ENABLE_OTA) {
-      ArduinoOTA.handle();
-    }
-    delay(20);
+bool staticDisplaySetupSingle(char * message) {
+  if (isStaticDisplay &&
+      ((int)strlen(message) > 0) &&
+      ((int)strlen(message) <= ((displayWidth * 8) / 6)))
+  {
+    // msg fits on one screen : no scroll necessary
+    matrix.fillScreen(CLEARSCREEN);
+    centerPrint(String(message), false);
+    SCHEDULE_INTERVAL_START(staticDisplayLastTime,0);
+    isStaticDisplayBusy = true;
+    isStaticDisplayNew = true;
+    return true;
+  } else {
+    return false;
   }
 }
 
-void centerPrint(String msg) {
-  centerPrint(msg, false);
+void staticDisplaySetup(void) {
+  if (isStaticDisplayNew && !isStaticDisplayBusy) {
+    isStaticDisplayBusy = true;
+    SCHEDULE_INTERVAL_START(staticDisplayLastTime,0);
+    staticDisplayNext();
+  }
 }
 
-void centerPrint(String msg, boolean extraStuff) {
-  int x = (matrix.width() - (msg.length() * width)) / 2;
+void staticDisplayNext(void) {
+  if (isStaticDisplayBusy) {
+    int maxMsgLen = (displayWidth * 8) / 6;
+    // find (next) fitting message (too long messages will not be shown)
+    while (staticDisplayIdxOut < staticDisplayIdx) {
+      int len = staticDisplay[staticDisplayIdxOut].length();
+      if (len > 0 && len <= maxMsgLen) break;
+      staticDisplayIdxOut++;
+    }
+
+    if (staticDisplayIdxOut < staticDisplayIdx) {
+      // msg fits on one screen : no scroll necessary
+      matrix.fillScreen(CLEARSCREEN);
+      centerPrint(staticDisplay[staticDisplayIdxOut], false);
+      staticDisplayIdxOut++;
+    } else {
+      // at end of list: reset and continue
+      staticDisplayIdx = 0;
+      staticDisplayIdxOut = 0;
+      isStaticDisplayNew = false;
+      isStaticDisplayBusy = false;
+    }
+  }
+}
+
+void centerPrint(const String &msg, bool extraStuff) {
+  int x = (matrix.width() - (msg.length() * font_width)) / 2;
+  if (x < 0) {
+    Serial.printf_P(PSTR("Error: centerPrint msg too large! len=%u:%s\n"), msg.length(), msg.c_str());
+  }
 
   // Print the static portions of the display before the main Message
   if (extraStuff) {
-    if (!IS_24HOUR && IS_PM && isPM()) {
+    if (!is24hour && isPmIndicator && isPM()) {
+      // Place PM indicator pixel at right edge, bottom line of digits
       matrix.drawPixel(matrix.width() - 1, 6, HIGH);
     }
-
-    if (OCTOPRINT_ENABLED && OCTOPRINT_PROGRESS && printerClient.isPrinting()) {
-      int numberOfLightPixels = (printerClient.getProgressCompletion().toFloat() / float(100)) * (matrix.width() - 1);
-      matrix.drawFastHLine(0, 7, numberOfLightPixels, HIGH);
-    }
-    
   }
-  
+
   matrix.setCursor(x, 0);
   matrix.print(msg);
 
   matrix.write();
 }
 
-String decodeHtmlString(String msg) {
-  String decodedMsg = msg;
-  // Restore special characters that are misformed to %char by the client browser
-  decodedMsg.replace("+", " ");
-  decodedMsg.replace("%21", "!");
-  decodedMsg.replace("%22", "");
-  decodedMsg.replace("%23", "#");
-  decodedMsg.replace("%24", "$");
-  decodedMsg.replace("%25", "%");
-  decodedMsg.replace("%26", "&");
-  decodedMsg.replace("%27", "'");
-  decodedMsg.replace("%28", "(");
-  decodedMsg.replace("%29", ")");
-  decodedMsg.replace("%2A", "*");
-  decodedMsg.replace("%2B", "+");
-  decodedMsg.replace("%2C", ",");
-  decodedMsg.replace("%2F", "/");
-  decodedMsg.replace("%3A", ":");
-  decodedMsg.replace("%3B", ";");
-  decodedMsg.replace("%3C", "<");
-  decodedMsg.replace("%3D", "=");
-  decodedMsg.replace("%3E", ">");
-  decodedMsg.replace("%3F", "?");
-  decodedMsg.replace("%40", "@");
-  decodedMsg.toUpperCase();
-  decodedMsg.trim();
-  return decodedMsg;
+
+String EncodeHtmlSpecialChars(const char *msg)
+{
+  String encoded;
+  int inIdx;
+  char ch;
+  const int inLen = strlen(msg);
+  //Serial.printf_P(PSTR("EncodeHTML in:  %s\n"), msg);
+  encoded.reserve(inLen+128);
+  for (inIdx=0; inIdx < inLen; inIdx++) {
+    ch = msg[inIdx];
+    if (ch < ' ') continue; // skip all non printable chars
+    if ( ch == '\'' || ch == '"' || ch == '<' || ch == '>')
+    {
+      // convert character to "&#<decimal>;"
+      encoded += '&';
+      encoded += '#';
+      encoded += (int)ch;
+      encoded += ';';
+    }
+    else {
+      encoded += ch;
+    }
+  }
+  //Serial.printf_P(PSTR("EncodeHTML out: %s\n"), encoded.c_str());
+  return encoded;
+}
+
+
+String EncodeUrlSpecialChars(const char *msg)
+{
+const static char special[] = {'\x20','\x22','\x23','\x24','\x25','\x26','\x2B','\x3B','\x3C','\x3D','\x3E','\x3F','\x40'};
+  String encoded;
+  int inIdx;
+  char ch, hex;
+  bool convert;
+  const int inLen = strlen(msg);
+  //Serial.printf_P(PSTR("EncodeURL in:  %s\n"), msg);
+  encoded.reserve(inLen+128);
+
+  for (inIdx=0; inIdx < inLen; inIdx++) {
+    ch = msg[inIdx];
+    convert = false;
+    if (ch < ' ') {
+      convert = true; // this includes 0x80-0xFF !
+    }
+    // find ch in table
+    for (int i=0; i < (int)sizeof(special) && !convert; i++) {
+      if (special[i] == ch) convert = true;
+    }
+    if (convert) {
+      // convert character to "%HEX"
+      encoded += '%';
+      hex = (ch >> 4) & 0x0F;
+      hex += '0';
+      if (hex > '9') hex += 7;
+      encoded += hex;
+      hex = ch & 0x0F;
+      hex += '0';
+      if (hex > '9') hex += 7;
+      encoded += hex;
+    }
+    else {
+      encoded += ch;
+    }
+  }
+  //Serial.printf_P(PSTR("EncodeURL out: %s\n"), encoded.c_str());
+  return encoded;
 }
