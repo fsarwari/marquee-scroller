@@ -869,6 +869,7 @@ void processEverySecond() {
     case WIDE_CLOCK_STYLE_HHMM_CF:
         // On Wide Display -- show the current temperature as well
         add = String(weatherClient.getTemperature(),0);
+        if (add == "-0") add = "0"; // avoid -0 display
         displayTime += " " + add + getTempSymbol();
         break;
     case WIDE_CLOCK_STYLE_HHMM_RH:
