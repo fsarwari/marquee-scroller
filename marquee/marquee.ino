@@ -647,7 +647,13 @@ void loop() {
   if (isOTAenabled) {
     ArduinoOTA.handle();
   }
-
+  #if COMPILE_MQTT
+  // allow the mqtt client to do its thing
+  if (isMqttEnabled) {
+    mqttClient.loop();
+    newMqttMessage = mqttClient.getNewMqttMessage();
+  }
+  #endif
   ESP_WiFiManager->run();
 }
 
@@ -835,14 +841,6 @@ void processEverySecond() {
   //if ((WiFi.status() != WL_CONNECTED) && (timeStatus() == timeNotSet))
   if (ESP_WiFiManager->isConfigMode())
     return;
-
-  #if COMPILE_MQTT
-  // allow the mqtt client to do its thing
-  if (isMqttEnabled) {
-    mqttClient.loop();
-    newMqttMessage = mqttClient.getNewMqttMessage();
-  }
-  #endif
 
   //Get some Weather Data to serve
   if ((getMinutesFromLastRefresh() >= refreshDataInterval) || lastRefreshDataTimestamp == 0) {
