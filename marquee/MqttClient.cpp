@@ -34,7 +34,9 @@ void callback(char* topic, uint8_t* message, unsigned int length) {
         Serial.print(remoteId);
         Serial.print(" keyCode: ");
         Serial.println(keyCode);
-        livoloRemote.send(remoteId, keyCode);
+        digitalWrite(LED_BUILTIN, LOW);
+        livoloRemote.send(remoteId, keyCode,30);
+        digitalWrite(LED_BUILTIN, HIGH);
       } else {
         Serial.println("Invalid payload format. Use: remoteId,keyCode");
       }
